@@ -13,6 +13,7 @@ roll-picker form and History, but **no query engine and no separate database**.
 | Data target | Sheet1 | Sheet1 |
 | History source | Sheet1 (tail read) | Sheet1 (tail read) |
 | Submit UX | Awaited (felt slow when the deployment was cold) | **Optimistic** (instant), idempotent server write |
+| Delete UX | Awaited + full refetch | **Optimistic** (instant), content-verified server delete, restores on failure |
 
 Three things drive the speed:
 
@@ -75,10 +76,13 @@ overwriting the old one.
 - `submit` — append a row (plus mirror row for transfers). Idempotent: dedupes
   against the last 40 rows on `timestamp | account | value | label`.
 - `update` — overwrite the row at `rowIndex`.
-- `delete` — delete the row at `rowIndex`.
+- `delete` — delete a row. If the caller passes the row content (account/value/
+  label/details), it deletes at `rowIndex` only if that row still matches, else
+  relocates the matching row in the tail, else treats it as already gone
+  (idempotent). This keeps optimistic delete safe even after row numbers shift.
 - `getRecent` — return the last `count` rows (default 500, most-recent-first)
   with absolute `rowIndex`.
-- `doGet` — echoes `backendVersion` (`lean-v1`) for a quick "is it live?" check.
+- `doGet` — echoes `backendVersion` (`lean-v2`) for a quick "is it live?" check.
 
 ## Frontend notes
 - Categories (Account/Label/Details/Asset Class) are editable per device and

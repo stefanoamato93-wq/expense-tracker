@@ -22,7 +22,7 @@
  */
 
 const SHEET_NAME = 'Sheet1';
-const BACKEND_VERSION = 'lean-v1';
+const BACKEND_VERSION = 'lean-v2';
 const N_COLS = 7; // A..G
 
 function doGet() {
@@ -94,9 +94,50 @@ function handleUpdate_(sheet, data) {
 
 function handleDelete_(sheet, data) {
   const rowIndex = Number(data.rowIndex);
+
+  // Content-aware delete (safe for optimistic UI). Deleting a row renumbers the
+  // rows below it, so a cached rowIndex can go stale. If the caller passes the
+  // row's content we (1) delete at rowIndex only if it still matches, else (2)
+  // relocate the matching row in the tail, else (3) treat it as already gone
+  // (idempotent). This guarantees we never delete the wrong row.
+  const hasContent = data.label !== undefined && data.value !== undefined;
+  if (hasContent) {
+    const lastRow = sheet.getLastRow();
+    if (lastRow < 2) return { success: true, alreadyGone: true };
+
+    // Match on account/value/label/details using DISPLAY values, which is what
+    // getRecent returned to the client, so strings compare like-for-like.
+    const eq = (dv) =>
+      String(dv[1]) === String(data.accountMinus) &&
+      Number(dv[2]) === Number(data.value) &&
+      String(dv[3]) === String(data.label) &&
+      String(dv[4]) === String(data.details);
+
+    if (rowIndex >= 2 && rowIndex <= lastRow) {
+      const cur = sheet.getRange(rowIndex, 1, 1, 5).getDisplayValues()[0];
+      if (eq(cur)) { sheet.deleteRow(rowIndex); return { success: true, deletedRow: rowIndex }; }
+    }
+
+    // Relocate: scan the tail and pick the match closest to the requested row.
+    const n = Math.min(120, lastRow - 1);
+    const start = lastRow - n + 1;
+    const dv = sheet.getRange(start, 1, n, 5).getDisplayValues();
+    let best = 0, bestDist = Infinity;
+    for (let i = 0; i < n; i++) {
+      if (eq(dv[i])) {
+        const abs = start + i;
+        const dist = Math.abs(abs - rowIndex);
+        if (dist < bestDist) { bestDist = dist; best = abs; }
+      }
+    }
+    if (best) { sheet.deleteRow(best); return { success: true, deletedRow: best, relocated: true }; }
+    return { success: true, alreadyGone: true };
+  }
+
+  // Legacy path: delete strictly by rowIndex.
   if (!rowIndex || rowIndex < 2) throw new Error('Invalid rowIndex for delete.');
   sheet.deleteRow(rowIndex);
-  return { success: true };
+  return { success: true, deletedRow: rowIndex };
 }
 
 function handleGetRecent_(sheet, data) {

@@ -260,7 +260,7 @@ body {
   <div class="header-left">
     <button id="btnRecent">History</button>
   </div>
-  <h1>Expense Tracker v1</h1>
+  <h1>Expense Tracker v2</h1>
   <button id="btnNew">+ New</button>
 </div>
 
@@ -965,6 +965,63 @@ function retryEntry(id) {
 }
 
 // ============================================================
+// OPTIMISTIC DELETE
+// Remove from History immediately, delete in the background, and restore the
+// entry (with a warning) if the server delete fails. The backend verifies the
+// row by content, so it never deletes the wrong row even if numbers shifted.
+// ============================================================
+function sameCachedRow(a, b) {
+  if (a._id && b._id) return a._id === b._id;
+  if (a.rowIndex && b.rowIndex) return Number(a.rowIndex) === Number(b.rowIndex);
+  return rowKey(a) === rowKey(b);
+}
+
+function restoreDeletedEntry(removed, idx) {
+  const rows = getCachedRows();
+  const at = (idx >= 0 && idx <= rows.length) ? idx : 0;
+  rows.splice(at, 0, removed);
+  setCachedRows(rows);
+  if (document.getElementById('viewHistory').classList.contains('active')) {
+    renderRecent(getCachedRows());
+  }
+}
+
+function optimisticDelete(row) {
+  const rows = getCachedRows();
+  const idx = rows.findIndex(r => sameCachedRow(r, row));
+  const removed = idx >= 0 ? rows[idx] : Object.assign({}, row);
+  if (idx >= 0) { rows.splice(idx, 1); setCachedRows(rows); renderRecent(getCachedRows()); }
+  showToast('Deleted');
+
+  const payload = {
+    action: 'delete',
+    rowIndex: row.rowIndex,
+    accountMinus: row.accountMinus,
+    value: row.value,
+    label: row.label,
+    details: row.details
+  };
+  apiCall(payload).then(result => {
+    if (result && result.success) {
+      // A delete renumbers rows below it, keep the remaining cached rowIndexes
+      // correct so later edits/deletes this session still target the right row.
+      const del = Number(result.deletedRow || row.rowIndex);
+      if (del) {
+        const cur = getCachedRows();
+        cur.forEach(r => { if (r.rowIndex && Number(r.rowIndex) > del) r.rowIndex = Number(r.rowIndex) - 1; });
+        setCachedRows(cur);
+      }
+    } else {
+      restoreDeletedEntry(removed, idx);
+      showToast('⚠ Delete failed — entry restored');
+    }
+  }).catch(() => {
+    restoreDeletedEntry(removed, idx);
+    showToast('⚠ Delete failed — entry restored');
+  });
+}
+
+// ============================================================
 // FORM HELPERS
 // ============================================================
 function resetForm() {
@@ -1065,24 +1122,10 @@ function renderRecent(rows) {
 
     const delBtn = div.querySelector('.btn-delete-entry');
     if (delBtn) {
-      delBtn.addEventListener('click', async (e) => {
+      delBtn.addEventListener('click', (e) => {
         e.stopPropagation();
         if (!confirm('Delete this entry?')) return;
-        const btn = e.target;
-        btn.disabled = true; btn.textContent = '...';
-        try {
-          const result = await apiCall({ action: 'delete', rowIndex: row.rowIndex });
-          if (result && result.success) {
-            showToast('Deleted');
-            loadRecent(); // refetch so remaining rowIndexes stay correct
-          } else {
-            showToast('Error: ' + ((result && result.error) || 'Unknown'));
-            btn.disabled = false; btn.textContent = '✕';
-          }
-        } catch (err) {
-          showToast('Network error');
-          btn.disabled = false; btn.textContent = '✕';
-        }
+        optimisticDelete(row);
       });
     }
     list.appendChild(div);
