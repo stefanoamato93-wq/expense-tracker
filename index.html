@@ -1,0 +1,1408 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>Expense Tracker</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+:root {
+  --bg: #f2f2f7; --card: #fff; --primary: #007aff; --danger: #ff3b30;
+  --success: #34c759; --text: #1c1c1e; --secondary: #8e8e93;
+  --border: #c6c6c8; --input-bg: #e5e5ea; --radius: 12px;
+}
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'SF Pro', sans-serif;
+  background: var(--bg); color: var(--text); min-height: 100dvh;
+  padding: 0 0 env(safe-area-inset-bottom);
+}
+.header {
+  background: var(--card); padding: 16px 20px; border-bottom: 0.5px solid var(--border);
+  display: flex; justify-content: space-between; align-items: center;
+  position: sticky; top: 0; z-index: 100;
+}
+.header h1 { font-size: 17px; font-weight: 600; }
+.header-left { display: flex; align-items: center; gap: 2px; }
+.header button {
+  background: none; border: none; color: var(--primary); font-size: 15px;
+  font-weight: 500; cursor: pointer; padding: 8px;
+}
+.container { padding: 10px 24px; max-width: 500px; margin: 0 auto; }
+.card {
+  background: var(--card); border-radius: var(--radius); padding: 10px 12px;
+  margin-bottom: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+}
+.field-label {
+  font-size: 12px; font-weight: 500; color: var(--secondary);
+  text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px;
+}
+</style>
+<style>
+/* Text Roll Picker */
+.text-roll-wrapper {
+  height: 120px; overflow: hidden; position: relative;
+  border-radius: 10px; background: var(--input-bg);
+  touch-action: none;
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0%, black 30%, black 70%, transparent 100%);
+  mask-image: linear-gradient(to bottom, transparent 0%, black 30%, black 70%, transparent 100%);
+}
+.text-roll-track { transition: transform 0.3s cubic-bezier(0.23, 1, 0.32, 1); }
+.text-roll-item {
+  height: 40px; display: flex; align-items: center; justify-content: center;
+  font-size: 14px; font-weight: 500; color: #555;
+  user-select: none; -webkit-user-select: none; padding: 0 8px; text-align: center;
+}
+.text-roll-item.selected { color: #000; font-size: 16px; font-weight: 700; }
+.text-roll-highlight {
+  position: absolute; top: 40px; left: 8px; right: 8px; height: 40px;
+  border-radius: 8px; background: rgba(0,122,255,0.08);
+  border: 1.5px solid rgba(0,122,255,0.3); pointer-events: none;
+}
+/* Leave a scroll-safe gutter on the RIGHT of the form pickers so a thumb
+   swipe on the right edge scrolls the page instead of the roll. */
+#viewForm .text-roll-wrapper { width: 72%; }
+#viewForm .num-roll-wrapper { margin-right: 28%; }
+.free-text-input {
+  width: 100%; margin-top: 6px; padding: 8px 14px; border: 1px solid var(--border);
+  border-radius: 10px; font-size: 16px; background: var(--input-bg); outline: none;
+}
+.free-text-input:focus { border-color: var(--primary); background: #fff; }
+.free-text-input::placeholder { color: var(--secondary); }
+
+/* Number Roll */
+.roll-container { display: flex; align-items: center; gap: 12px; }
+.num-roll-wrapper {
+  flex: 1; height: 120px; overflow: hidden; position: relative;
+  border-radius: 10px; background: var(--input-bg);
+  touch-action: none;
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0%, black 30%, black 70%, transparent 100%);
+  mask-image: linear-gradient(to bottom, transparent 0%, black 30%, black 70%, transparent 100%);
+}
+.num-roll-track { transition: transform 0.3s cubic-bezier(0.23, 1, 0.32, 1); }
+.num-roll-item {
+  height: 40px; display: flex; align-items: center; justify-content: center;
+  font-size: 20px; font-weight: 500; color: #555;
+  user-select: none; -webkit-user-select: none;
+}
+.num-roll-item.selected { color: #000; font-size: 24px; font-weight: 700; }
+.num-roll-highlight {
+  position: absolute; top: 40px; left: 8px; right: 8px; height: 40px;
+  border-radius: 8px; background: rgba(0,122,255,0.08);
+  border: 1.5px solid rgba(0,122,255,0.3); pointer-events: none;
+}
+.roll-sign-btn {
+  width: 44px; height: 44px; border-radius: 22px; border: none;
+  background: var(--input-bg); font-size: 22px; font-weight: 700;
+  color: var(--text); cursor: pointer; display: flex;
+  align-items: center; justify-content: center;
+}
+.roll-sign-btn.negative { background: #ffe5e5; color: var(--danger); }
+</style>
+<style>
+/* Buttons */
+.btn {
+  width: 100%; padding: 14px; border: none; border-radius: 12px;
+  font-size: 16px; font-weight: 600; cursor: pointer; transition: opacity 0.2s;
+}
+.btn:active { opacity: 0.7; }
+.btn-primary { background: var(--primary); color: #fff; }
+.btn-secondary { background: var(--input-bg); color: var(--text); margin-top: 8px; }
+.btn:disabled { opacity: 0.4; pointer-events: none; }
+
+/* Toast */
+.toast {
+  position: fixed; bottom: 100px; left: 50%; transform: translateX(-50%);
+  background: #333; color: #fff; padding: 12px 24px; border-radius: 20px;
+  font-size: 14px; font-weight: 500; z-index: 1000; opacity: 0;
+  transition: opacity 0.3s; pointer-events: none; max-width: 90%; text-align: center;
+}
+.toast.show { opacity: 1; }
+
+/* Recent entries */
+.recent-entry {
+  padding: 12px 0; border-bottom: 0.5px solid var(--border); cursor: pointer;
+  position: relative; padding-right: 44px;
+}
+.recent-entry:last-child { border-bottom: none; }
+.recent-entry .re-top { display: flex; justify-content: space-between; align-items: center; }
+.recent-entry .re-value { font-size: 18px; font-weight: 700; }
+.recent-entry .re-value.positive { color: var(--success); }
+.recent-entry .re-value.negative { color: var(--danger); }
+.recent-entry .re-details { font-size: 13px; color: var(--secondary); margin-top: 2px; }
+.recent-entry .re-time { font-size: 12px; color: var(--secondary); }
+.recent-entry .re-status { font-size: 11px; font-weight: 600; margin-top: 2px; }
+.recent-entry .re-status.saving { color: var(--secondary); }
+.recent-entry .re-status.error { color: var(--danger); }
+.btn-delete-entry {
+  position: absolute; right: 0; top: 50%; transform: translateY(-50%);
+  width: 32px; height: 32px; border-radius: 16px; border: none;
+  background: var(--danger); color: #fff; font-size: 14px; font-weight: 700;
+  cursor: pointer; display: flex; align-items: center; justify-content: center;
+}
+.btn-delete-entry:active { opacity: 0.7; }
+
+/* Views */
+.view { display: none; }
+.view.active { display: block; }
+.spinner {
+  width: 24px; height: 24px; border: 3px solid var(--border);
+  border-top-color: var(--primary); border-radius: 50%;
+  animation: spin 0.8s linear infinite; margin: 20px auto;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+.hidden { display: none !important; }
+
+/* Field header row (label + edit button) */
+.field-row {
+  display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;
+}
+.field-row .field-label { margin-bottom: 0; }
+.edit-btn {
+  background: none; border: none; color: var(--primary);
+  font-size: 13px; font-weight: 600; cursor: pointer; padding: 2px 4px;
+}
+.edit-btn:active { opacity: 0.6; }
+
+/* Category editor modal */
+.modal-overlay {
+  position: fixed; inset: 0; background: rgba(0,0,0,0.4); z-index: 2000;
+  display: flex; align-items: flex-end; justify-content: center;
+}
+.modal {
+  background: var(--card); width: 100%; max-width: 500px;
+  border-radius: 16px 16px 0 0; max-height: 80dvh; display: flex; flex-direction: column;
+  animation: slideUp 0.25s cubic-bezier(0.23, 1, 0.32, 1);
+}
+@keyframes slideUp { from { transform: translateY(100%); } to { transform: translateY(0); } }
+.modal-header {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 16px 20px; border-bottom: 0.5px solid var(--border);
+}
+.modal-header #editModalTitle { flex: 1; text-align: center; font-size: 16px; font-weight: 600; }
+.modal-header button {
+  background: none; border: none; color: var(--primary);
+  font-size: 15px; font-weight: 600; cursor: pointer; padding: 4px; white-space: nowrap;
+}
+.modal-header .reset-link { color: var(--danger); }
+.modal-list { overflow-y: auto; padding: 8px 20px; flex: 1; }
+.modal-item {
+  display: flex; align-items: center; gap: 8px;
+  padding: 10px 0; border-bottom: 0.5px solid var(--border);
+  background: var(--card);
+}
+.modal-item span { font-size: 15px; }
+.modal-item .item-name { flex: 1; }
+.modal-item span.blank { color: var(--secondary); font-style: italic; }
+.drag-handle {
+  flex-shrink: 0; cursor: grab; color: var(--secondary); font-size: 18px;
+  line-height: 1; padding: 6px 6px 6px 0; touch-action: none;
+  user-select: none; -webkit-user-select: none;
+}
+.drag-handle:active { cursor: grabbing; }
+.modal-item.dragging {
+  border-radius: 8px; border-bottom-color: transparent;
+  box-shadow: 0 4px 14px rgba(0,0,0,0.18); position: relative; z-index: 10; opacity: 0.97;
+}
+.modal-item button {
+  width: 28px; height: 28px; border-radius: 14px; border: none;
+  background: var(--danger); color: #fff; font-size: 13px; font-weight: 700;
+  cursor: pointer; display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+}
+.modal-item button:active { opacity: 0.7; }
+.modal-add {
+  display: flex; gap: 8px; padding: 12px 20px 20px;
+  border-top: 0.5px solid var(--border);
+}
+.modal-add input {
+  flex: 1; padding: 10px 14px; border: 1px solid var(--border);
+  border-radius: 10px; font-size: 16px; background: var(--input-bg); outline: none;
+}
+.modal-add input:focus { border-color: var(--primary); background: #fff; }
+.modal-add button {
+  padding: 10px 18px; border: none; border-radius: 10px;
+  background: var(--primary); color: #fff; font-size: 15px; font-weight: 600; cursor: pointer;
+}
+.modal-add button:active { opacity: 0.7; }
+
+/* Details-per-label selector inside the editor */
+.modal-sublabel {
+  display: flex; align-items: center; gap: 8px;
+  padding: 12px 20px 4px;
+}
+.modal-sublabel span {
+  font-size: 13px; color: var(--secondary); font-weight: 500; white-space: nowrap;
+}
+.modal-sublabel select {
+  flex: 1; padding: 8px 10px; border: 1px solid var(--border);
+  border-radius: 8px; background: var(--input-bg); font-size: 15px; color: var(--text); outline: none;
+}
+
+/* Export sheet */
+.export-body { padding: 16px 20px; display: flex; flex-direction: column; gap: 10px; }
+.export-note { font-size: 13px; color: var(--secondary); }
+.export-text {
+  width: 100%; min-height: 180px; resize: vertical; padding: 12px;
+  border: 1px solid var(--border); border-radius: 10px; background: var(--input-bg);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px;
+  color: var(--text); outline: none; white-space: pre;
+}
+.export-copy {
+  width: 100%; padding: 12px; border: none; border-radius: 10px;
+  background: var(--primary); color: #fff; font-size: 15px; font-weight: 600; cursor: pointer;
+}
+.export-copy:active { opacity: 0.7; }
+</style>
+</head>
+<body>
+<div class="header">
+  <div class="header-left">
+    <button id="btnRecent">History</button>
+  </div>
+  <h1>Expense Tracker v1</h1>
+  <button id="btnNew">+ New</button>
+</div>
+
+<!-- FORM VIEW -->
+<div id="viewForm" class="view active">
+<div class="container">
+
+  <!-- Account (-) -->
+  <div class="card">
+    <div class="field-row">
+      <span class="field-label">Account (−)</span>
+      <button class="edit-btn" data-roll="accountMinus">Edit</button>
+    </div>
+    <div class="text-roll-wrapper" id="rollAccountMinus">
+      <div class="text-roll-highlight"></div>
+      <div class="text-roll-track"></div>
+    </div>
+    <input type="text" class="free-text-input" id="freeAccountMinus" placeholder="Or type custom...">
+  </div>
+
+  <!-- Value -->
+  <div class="card">
+    <div class="field-label">Value</div>
+    <div class="roll-container">
+      <button class="roll-sign-btn negative" id="rollSign">−</button>
+      <div class="num-roll-wrapper" id="rollValue">
+        <div class="num-roll-highlight"></div>
+        <div class="num-roll-track"></div>
+      </div>
+    </div>
+    <input type="number" class="free-text-input" id="manualValue" placeholder="Or type value manually...">
+  </div>
+
+  <!-- Label -->
+  <div class="card">
+    <div class="field-row">
+      <span class="field-label">Label</span>
+      <button class="edit-btn" data-roll="label">Edit</button>
+    </div>
+    <div class="text-roll-wrapper" id="rollLabel">
+      <div class="text-roll-highlight"></div>
+      <div class="text-roll-track"></div>
+    </div>
+    <input type="text" class="free-text-input" id="freeLabel" placeholder="Or type custom...">
+  </div>
+
+  <!-- Details -->
+  <div class="card">
+    <div class="field-row">
+      <span class="field-label">Details</span>
+      <button class="edit-btn" data-roll="details">Edit</button>
+    </div>
+    <div class="text-roll-wrapper" id="rollDetails">
+      <div class="text-roll-highlight"></div>
+      <div class="text-roll-track"></div>
+    </div>
+    <input type="text" class="free-text-input" id="freeDetails" placeholder="Or type custom...">
+  </div>
+
+  <!-- Account (+) — only visible when Label = Transfer -->
+  <div class="card" id="cardAccountPlus">
+    <div class="field-row">
+      <span class="field-label">Account (+)</span>
+      <button class="edit-btn" data-roll="accountPlus">Edit</button>
+    </div>
+    <div class="text-roll-wrapper" id="rollAccountPlus">
+      <div class="text-roll-highlight"></div>
+      <div class="text-roll-track"></div>
+    </div>
+    <input type="text" class="free-text-input" id="freeAccountPlus" placeholder="Or type custom...">
+  </div>
+
+  <!-- Assetclassdetails — only visible when Label = Transfer -->
+  <div class="card" id="cardAssetclass">
+    <div class="field-row">
+      <span class="field-label">Asset Class Details</span>
+      <button class="edit-btn" data-roll="assetclass">Edit</button>
+    </div>
+    <div class="text-roll-wrapper" id="rollAssetclass">
+      <div class="text-roll-highlight"></div>
+      <div class="text-roll-track"></div>
+    </div>
+    <input type="text" class="free-text-input" id="freeAssetclass" placeholder="Or type custom (optional)...">
+  </div>
+
+  <!-- Submit -->
+  <div class="card">
+    <button class="btn btn-primary" id="btnSubmit">Submit</button>
+    <button class="btn btn-secondary hidden" id="btnCancel">Cancel Edit</button>
+  </div>
+
+  <!-- Tools -->
+  <div class="card">
+    <button class="btn btn-secondary" id="btnExport" style="margin-top:0;">Export categories</button>
+  </div>
+
+</div>
+</div>
+
+<!-- HISTORY VIEW -->
+<div id="viewHistory" class="view">
+<div class="container">
+  <div class="card">
+    <div class="field-label">Recent Entries</div>
+    <div id="recentList"><div class="spinner"></div></div>
+  </div>
+</div>
+</div>
+
+<!-- CATEGORY EDITOR MODAL -->
+<div class="modal-overlay hidden" id="editModal">
+  <div class="modal">
+    <div class="modal-header">
+      <button id="editModalReset" class="reset-link">Reset</button>
+      <span id="editModalTitle">Edit</span>
+      <button id="editModalClose">Done</button>
+    </div>
+    <div class="modal-sublabel hidden" id="editDetailsLabelRow">
+      <span>Details for label:</span>
+      <select id="editDetailsLabelSelect"></select>
+    </div>
+    <div class="modal-list" id="editModalList"></div>
+    <div class="modal-add">
+      <input type="text" id="editModalInput" placeholder="New category..." autocapitalize="none">
+      <button id="editModalAdd">Add</button>
+    </div>
+  </div>
+</div>
+
+<!-- EXPORT MODAL -->
+<div class="modal-overlay hidden" id="exportModal">
+  <div class="modal">
+    <div class="modal-header">
+      <span id="editModalTitle">Export categories</span>
+      <button id="exportModalClose">Done</button>
+    </div>
+    <div class="export-body">
+      <p class="export-note">Copy this and send it to Kiro to update the <code>index.html</code> defaults.</p>
+      <textarea class="export-text" id="exportText" readonly spellcheck="false"></textarea>
+      <button class="export-copy" id="exportCopy">Copy to clipboard</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+<script>
+// ============================================================
+// CONFIG — paste the NEW Apps Script /exec URL here after you deploy
+// apps-script.js from THIS folder as its own web app.
+// ============================================================
+const SCRIPT_URL = 'PASTE_NEW_DEPLOYMENT_EXEC_URL_HERE';
+
+// ============================================================
+// DATA LISTS (defaults + user-editable, persisted to localStorage)
+// ============================================================
+const DEFAULT_LISTS = {
+  accountMinus: ['AMEXPLATINUM','FINECO','AMEX','TRADEREPUBLIC','SATISPAY','EDENRED','CONCUR','CASH','OBJECTS','REVOLUT','SPLITWISE','PAYPAL','AMEXGOLD','DEGIRO','DIRECTASTOCKS','MEMBERSHIP','TRENITALIA','ITALO','PRIAMO','TFR','UPWORK','CREDITS','UNIPOL','DEBTS','ALLIANZ','TFRTAXES','FIDELITY','TRSTOCKS','DIRECTAFUNDS','AROMI','CAPGAIN'],
+  label: ['TRANSFER','GROCERIES','OFFERS','AMUSEMENTS','EXTRA','HOLIDAYS','TRANSPORTATION','RESTAURANTS','WORK','APPRECIATION','BILLS','OBJECTS','FOOD','WELLBEING','PRESENTS','SALARY','HEALTHCARE','CAR','HOUSING','CLOTHES','TAXES'],
+  details: {
+    HOUSING: ['Rent','MonthlyFee','HouseStuff','Maintenance','Cleaning'],
+    BILLS: ['Electricity','Internet','Heating','Tari','Phone','TV','Bureaucracy'],
+    GROCERIES: ['Groceries'],
+    CAR: ['Fuel','Insurance','Maintenance','ChangeOwnership','StateTax','Telepass','Fine','Parking','Depreciation'],
+    TRANSPORTATION: ['Train','Taxi','Metro','Micromobility'],
+    WORK: ['WorkTrain','WorkGroceries','WorkMetro','WorkMicromobility'],
+    HEALTHCARE: ['Specialists','Medicines','Dentist','Analysis','Exams','Physiotherapy'],
+    HOLIDAYS: ['Palermo-Jun26','Palermo-Jul26','Warsaw-Sep26'],
+    OBJECTS: ['Depreciation'],
+    WELLBEING: ['Psyco','Gym','Hair','Sport','Massage'],
+    AMUSEMENTS: ['Alcol','Coke','CreditCardCosts','Subscriptions','Events','Games','Dinners'],
+    RESTAURANTS: ['Restaurants'],
+    FOOD: ['Food'],
+    CLOTHES: ['Clothes'],
+    PRESENTS: ['Presents'],
+    OFFERS: ['Offers'],
+    TRANSFER: ['T'],
+    EXTRA: [],
+    APPRECIATION: [],
+    SALARY: [],
+    TAXES: []
+  },
+  accountPlus: ['','AMEXPLATINUM','FINECO','AMEX','TRADEREPUBLIC','SATISPAY','EDENRED','CONCUR','CASH','OBJECTS','REVOLUT','SPLITWISE','PAYPAL','AMEXGOLD','DEGIRO','DIRECTASTOCKS','MEMBERSHIP','TRENITALIA','ITALO','PRIAMO','TFR','UPWORK','CREDITS','UNIPOL','DEBTS','ALLIANZ','TFRTAXES','FIDELITY','TRSTOCKS','DIRECTAFUNDS','AROMI','CAPGAIN'],
+  assetclass: ['','VWCE','PENSIONFUND','AMS:IMAE','APPLEWATCH','AUTOMOBILE','IPAD','IPHONE','LON:IUSE','TV','EMERGENCYFUND']
+};
+
+const LISTS_STORAGE_KEY = 'expenseTrackerLists';
+
+function mergeDetails(stored) {
+  // details is keyed by label. Start from defaults, then override per-label
+  // arrays with any stored ones. Ignore any old flat-array format.
+  const out = {};
+  Object.keys(DEFAULT_LISTS.details).forEach(lbl => {
+    out[lbl] = DEFAULT_LISTS.details[lbl].slice();
+  });
+  if (stored && typeof stored === 'object' && !Array.isArray(stored)) {
+    Object.keys(stored).forEach(lbl => {
+      if (Array.isArray(stored[lbl])) out[lbl] = stored[lbl].slice();
+    });
+  }
+  return out;
+}
+
+function loadLists() {
+  let stored = null;
+  try { stored = JSON.parse(localStorage.getItem(LISTS_STORAGE_KEY)); } catch (e) { stored = null; }
+  const result = {};
+  Object.keys(DEFAULT_LISTS).forEach(key => {
+    if (key === 'details') {
+      result.details = mergeDetails(stored && stored.details);
+    } else {
+      result[key] = (stored && Array.isArray(stored[key])) ? stored[key].slice() : DEFAULT_LISTS[key].slice();
+    }
+  });
+  // Keep Account (+) in sync with Account (−): same accounts, plus a leading blank.
+  const accounts = result.accountMinus.filter(x => String(x).trim() !== '');
+  result.accountPlus = ['', ...accounts];
+  return result;
+}
+
+function saveLists() {
+  try { localStorage.setItem(LISTS_STORAGE_KEY, JSON.stringify(LISTS)); } catch (e) {}
+}
+
+const LISTS = loadLists();
+
+const LIST_TITLES = {
+  accountMinus: 'Account (−)',
+  label: 'Label',
+  details: 'Details',
+  accountPlus: 'Account (+)',
+  assetclass: 'Asset Class Details'
+};
+
+// ============================================================
+// HAPTIC FEEDBACK
+// ============================================================
+function haptic(ms) {
+  if (navigator.vibrate) { try { navigator.vibrate(ms); } catch (e) {} }
+}
+
+// ============================================================
+// STATE
+// ============================================================
+let editingRow = null;
+const ITEM_HEIGHT = 40;
+
+// ============================================================
+// LABEL -> DETAILS DEPENDENCY
+// ============================================================
+function currentLabel() {
+  return rollLabelInstance ? rollLabelInstance.getValue() : '';
+}
+function findDetailsKey(label) {
+  if (!label) return null;
+  if (Object.prototype.hasOwnProperty.call(LISTS.details, label)) return label;
+  const lower = String(label).toLowerCase();
+  return Object.keys(LISTS.details).find(k => k.toLowerCase() === lower) || null;
+}
+function detailsListForLabel(label) {
+  const key = findDetailsKey(label);
+  return key ? LISTS.details[key] : [];
+}
+function currentDetailsList() {
+  return detailsListForLabel(currentLabel());
+}
+function refreshDetailsForLabel() {
+  if (!rollDetails) return;
+  rollDetails.freeInput.value = '';
+  rollDetails.currentIndex = 0;
+  rollDetails.refresh();
+  updateTransferSections();
+}
+function updateTransferSections() {
+  const isTransfer = (currentLabel() || '').toLowerCase() === 'transfer';
+  const ap = document.getElementById('cardAccountPlus');
+  const ac = document.getElementById('cardAssetclass');
+  if (ap) ap.classList.toggle('hidden', !isTransfer);
+  if (ac) ac.classList.toggle('hidden', !isTransfer);
+}
+function ensureDetailsKey(label) {
+  let key = findDetailsKey(label);
+  if (!key) { key = label; LISTS.details[key] = []; }
+  return key;
+}
+
+// ============================================================
+// TEXT ROLL PICKER CLASS
+// ============================================================
+class TextRoll {
+  constructor(wrapperId, listKey, freeInputId, getItemsFn) {
+    this.wrapper = document.getElementById(wrapperId);
+    this.track = this.wrapper.querySelector('.text-roll-track');
+    this.freeInput = document.getElementById(freeInputId);
+    this.listKey = listKey;
+    this.getItemsFn = getItemsFn || (() => LISTS[listKey]);
+    this.onChange = null;
+    this.items = this.getItemsFn();
+    this.currentIndex = 0;
+    this.hoverIndex = 0;
+    this.isDragging = false;
+    this.velocity = 0;
+    this.lastTouchY = 0;
+    this.lastTouchTime = 0;
+    this.touchStartY = 0;
+    this.build();
+    this.initTouch();
+    this.initFreeInput();
+  }
+
+  build() {
+    this.items = this.getItemsFn();
+    this.track.innerHTML = '';
+    this.items.forEach(item => {
+      const div = document.createElement('div');
+      div.className = 'text-roll-item';
+      div.textContent = item;
+      this.track.appendChild(div);
+    });
+    this.setIndex(Math.min(this.currentIndex, this.items.length - 1));
+  }
+
+  refresh() {
+    this.items = this.getItemsFn();
+    if (this.currentIndex > this.items.length - 1) this.currentIndex = 0;
+    this.build();
+  }
+
+  setIndex(idx) {
+    idx = Math.max(0, Math.min(this.items.length - 1, idx));
+    const changed = idx !== this.currentIndex;
+    this.currentIndex = idx;
+    this.hoverIndex = idx;
+    this.track.style.transform = `translateY(${-idx * ITEM_HEIGHT + ITEM_HEIGHT}px)`;
+    const children = this.track.children;
+    for (let i = 0; i < children.length; i++) {
+      children[i].classList.toggle('selected', i === idx);
+    }
+    if (changed) haptic(10);
+    this.freeInput.value = '';
+    if (this.onChange) this.onChange();
+  }
+
+  getValue() {
+    const free = this.freeInput.value.trim();
+    return free || this.items[this.currentIndex];
+  }
+
+  setValue(val) {
+    const idx = this.items.findIndex(item => item.toLowerCase() === String(val).toLowerCase());
+    if (idx >= 0) {
+      this.track.style.transition = 'transform 0.3s cubic-bezier(0.23, 1, 0.32, 1)';
+      this.setIndex(idx);
+      this.freeInput.value = '';
+    } else {
+      this.freeInput.value = val || '';
+      if (this.onChange) this.onChange();
+    }
+  }
+
+  initTouch() {
+    this.wrapper.addEventListener('touchstart', (e) => {
+      this.isDragging = true;
+      this.touchStartY = e.touches[0].clientY;
+      this.lastTouchY = this.touchStartY;
+      this.lastTouchTime = Date.now();
+      this.velocity = 0;
+      this.track.style.transition = 'none';
+    }, { passive: false });
+
+    this.wrapper.addEventListener('touchmove', (e) => {
+      if (!this.isDragging) return;
+      e.preventDefault();
+      const y = e.touches[0].clientY;
+      const now = Date.now();
+      const dt = now - this.lastTouchTime;
+      if (dt > 0) this.velocity = (y - this.lastTouchY) / dt;
+      this.lastTouchY = y;
+      this.lastTouchTime = now;
+      const delta = y - this.touchStartY;
+      const baseOffset = -this.currentIndex * ITEM_HEIGHT + ITEM_HEIGHT;
+      const offset = baseOffset + delta;
+      this.track.style.transform = `translateY(${offset}px)`;
+      const approx = Math.max(0, Math.min(this.items.length - 1, Math.round(1 - offset / ITEM_HEIGHT)));
+      if (approx !== this.hoverIndex) { this.hoverIndex = approx; haptic(6); }
+    }, { passive: false });
+
+    this.wrapper.addEventListener('touchend', () => {
+      this.isDragging = false;
+      this.track.style.transition = 'transform 0.4s cubic-bezier(0.25, 0.46, 0.45, 0.94)';
+      const delta = this.lastTouchY - this.touchStartY;
+      const speed = Math.abs(this.velocity);
+      const momentumFactor = speed > 1.5 ? 400 : speed > 0.8 ? 250 : 150;
+      const momentum = this.velocity * momentumFactor;
+      const totalDelta = delta + momentum;
+      const indexDelta = Math.round(-totalDelta / ITEM_HEIGHT);
+      this.setIndex(this.currentIndex + indexDelta);
+    });
+
+    this.wrapper.addEventListener('wheel', (e) => {
+      e.preventDefault();
+      this.setIndex(this.currentIndex + (e.deltaY > 0 ? 1 : -1));
+    }, { passive: false });
+  }
+
+  initFreeInput() {
+    this.freeInput.addEventListener('input', () => { /* free text wins via getValue() */ });
+  }
+}
+
+// ============================================================
+// NUMBER ROLL (for Value field)
+// ============================================================
+let numRollItems = [];
+let numCurrentIndex = 0;
+let numHoverIndex = 0;
+let numIsDragging = false;
+let numVelocity = 0;
+let numLastTouchY = 0;
+let numLastTouchTime = 0;
+let numTouchStartY = 0;
+let isNegative = true;
+
+function buildNumRoll() {
+  const track = document.querySelector('#rollValue .num-roll-track');
+  track.innerHTML = '';
+  numRollItems = [];
+  for (let i = 0; i <= 100; i++) numRollItems.push(i);
+  for (let i = 110; i <= 1000; i += 10) numRollItems.push(i);
+  for (let i = 1100; i <= 10000; i += 100) numRollItems.push(i);
+  numRollItems.forEach(val => {
+    const div = document.createElement('div');
+    div.className = 'num-roll-item';
+    div.textContent = val;
+    track.appendChild(div);
+  });
+  setNumIndex(0);
+}
+
+function setNumIndex(idx) {
+  idx = Math.max(0, Math.min(numRollItems.length - 1, idx));
+  const changed = idx !== numCurrentIndex;
+  numCurrentIndex = idx;
+  numHoverIndex = idx;
+  const track = document.querySelector('#rollValue .num-roll-track');
+  track.style.transform = `translateY(${-idx * ITEM_HEIGHT + ITEM_HEIGHT}px)`;
+  const children = track.children;
+  for (let i = 0; i < children.length; i++) {
+    children[i].classList.toggle('selected', i === idx);
+  }
+  if (changed) haptic(10);
+  document.getElementById('manualValue').value = getSignedValue();
+}
+
+function getSignedValue() {
+  const absVal = numRollItems[numCurrentIndex];
+  return isNegative ? -absVal : absVal;
+}
+
+function getValueFromForm() {
+  const manual = document.getElementById('manualValue').value;
+  if (manual !== '') return parseInt(manual);
+  return getSignedValue();
+}
+
+function initNumRollTouch() {
+  const wrapper = document.getElementById('rollValue');
+  wrapper.addEventListener('touchstart', (e) => {
+    numIsDragging = true;
+    numTouchStartY = e.touches[0].clientY;
+    numLastTouchY = numTouchStartY;
+    numLastTouchTime = Date.now();
+    numVelocity = 0;
+    wrapper.querySelector('.num-roll-track').style.transition = 'none';
+  }, { passive: false });
+
+  wrapper.addEventListener('touchmove', (e) => {
+    if (!numIsDragging) return;
+    e.preventDefault();
+    const y = e.touches[0].clientY;
+    const now = Date.now();
+    const dt = now - numLastTouchTime;
+    if (dt > 0) numVelocity = (y - numLastTouchY) / dt;
+    numLastTouchY = y;
+    numLastTouchTime = now;
+    const delta = y - numTouchStartY;
+    const track = wrapper.querySelector('.num-roll-track');
+    const baseOffset = -numCurrentIndex * ITEM_HEIGHT + ITEM_HEIGHT;
+    const offset = baseOffset + delta;
+    track.style.transform = `translateY(${offset}px)`;
+    const approx = Math.max(0, Math.min(numRollItems.length - 1, Math.round(1 - offset / ITEM_HEIGHT)));
+    if (approx !== numHoverIndex) { numHoverIndex = approx; haptic(6); }
+  }, { passive: false });
+
+  wrapper.addEventListener('touchend', () => {
+    numIsDragging = false;
+    const track = wrapper.querySelector('.num-roll-track');
+    track.style.transition = 'transform 0.4s cubic-bezier(0.25, 0.46, 0.45, 0.94)';
+    const delta = numLastTouchY - numTouchStartY;
+    const speed = Math.abs(numVelocity);
+    const momentumFactor = speed > 1.5 ? 400 : speed > 0.8 ? 250 : 150;
+    const momentum = numVelocity * momentumFactor;
+    const totalDelta = delta + momentum;
+    const indexDelta = Math.round(-totalDelta / ITEM_HEIGHT);
+    setNumIndex(numCurrentIndex + indexDelta);
+  });
+
+  wrapper.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    setNumIndex(numCurrentIndex + (e.deltaY > 0 ? 1 : -1));
+  }, { passive: false });
+}
+
+// Sign toggle
+document.getElementById('rollSign').addEventListener('click', () => {
+  isNegative = !isNegative;
+  haptic(10);
+  const btn = document.getElementById('rollSign');
+  btn.textContent = isNegative ? '−' : '+';
+  btn.classList.toggle('negative', isNegative);
+  const mv = document.getElementById('manualValue');
+  if (mv.value !== '') {
+    const mag = Math.abs(parseInt(mv.value) || 0);
+    mv.value = isNegative ? -mag : mag;
+  } else {
+    mv.value = getSignedValue();
+  }
+});
+
+// Manual value: typing a bare number defaults to NEGATIVE (expense).
+document.getElementById('manualValue').addEventListener('input', (e) => {
+  let val = parseInt(e.target.value);
+  if (!isNaN(val)) {
+    if (val > 0) { isNegative = true; val = -val; e.target.value = val; }
+    else { isNegative = val < 0; }
+    const absVal = Math.abs(val);
+    const btn = document.getElementById('rollSign');
+    btn.textContent = isNegative ? '−' : '+';
+    btn.classList.toggle('negative', isNegative);
+    let closestIdx = 0;
+    let closestDiff = Math.abs(numRollItems[0] - absVal);
+    for (let i = 1; i < numRollItems.length; i++) {
+      const diff = Math.abs(numRollItems[i] - absVal);
+      if (diff < closestDiff) { closestDiff = diff; closestIdx = i; }
+      if (numRollItems[i] > absVal) break;
+    }
+    const track = document.querySelector('#rollValue .num-roll-track');
+    track.style.transition = 'transform 0.3s cubic-bezier(0.23, 1, 0.32, 1)';
+    numCurrentIndex = closestIdx;
+    track.style.transform = `translateY(${-closestIdx * ITEM_HEIGHT + ITEM_HEIGHT}px)`;
+    const items = track.children;
+    for (let i = 0; i < items.length; i++) {
+      items[i].classList.toggle('selected', i === closestIdx);
+    }
+  }
+});
+
+// ============================================================
+// API + TIMESTAMP
+// ============================================================
+async function apiCall(data) {
+  const resp = await fetch(SCRIPT_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'text/plain' },
+    body: JSON.stringify(data)
+  });
+  return await resp.json();
+}
+
+function formatTimestamp() {
+  const d = new Date();
+  const month = d.getMonth() + 1;
+  const day = d.getDate();
+  const year = d.getFullYear();
+  const h = d.getHours();
+  const m = String(d.getMinutes()).padStart(2, '0');
+  const s = String(d.getSeconds()).padStart(2, '0');
+  return `${month}/${day}/${year} ${h}:${m}:${s}`;
+}
+
+// ============================================================
+// HISTORY CACHE (per-device localStorage; mirrors last getRecent)
+// Also holds not-yet-synced optimistic entries so nothing is lost offline.
+// ============================================================
+const RECENT_CACHE_KEY = 'expenseTrackerRecentCache';
+
+function getCachedRows() {
+  try { const c = JSON.parse(localStorage.getItem(RECENT_CACHE_KEY)); if (c && Array.isArray(c.rows)) return c.rows; } catch (e) {}
+  return [];
+}
+function setCachedRows(rows) {
+  try { localStorage.setItem(RECENT_CACHE_KEY, JSON.stringify({ rows: rows, at: Date.now() })); } catch (e) {}
+}
+function updateCachedEntry(id, patch) {
+  const rows = getCachedRows();
+  const i = rows.findIndex(r => r._id === id);
+  if (i >= 0) { Object.assign(rows[i], patch); setCachedRows(rows); }
+}
+function patchCachedByRowIndex(rowIndex, patch) {
+  const rows = getCachedRows();
+  const i = rows.findIndex(r => Number(r.rowIndex) === Number(rowIndex));
+  if (i >= 0) { Object.assign(rows[i], patch); setCachedRows(rows); }
+}
+function uid() { return 'c' + Date.now() + Math.random().toString(36).slice(2, 7); }
+function rowKey(r) {
+  return [String(r.timestamp), String(r.accountMinus), String(parseInt(r.value) || 0), String(r.label), String(r.details)].join('|');
+}
+
+// Any entry still marked in-flight from a previous session can never resolve,
+// so flip it to an error state (tap-to-retry) on load. No data is lost.
+(function reconcilePendingOnLoad() {
+  const rows = getCachedRows();
+  let changed = false;
+  rows.forEach(r => { if (r._pending) { r._pending = false; r._error = true; changed = true; } });
+  if (changed) setCachedRows(rows);
+})();
+
+// ============================================================
+// SUBMIT (optimistic for new entries, awaited for edits)
+// ============================================================
+async function handleSubmit() {
+  const accountMinus = rollAccountMinus.getValue();
+  const label = rollLabelInstance.getValue();
+  const details = rollDetails.getValue();
+  const accountPlus = rollAccountPlusInstance.getValue();
+  const assetclass = rollAssetclass.getValue();
+  const value = getValueFromForm();
+
+  if (!accountMinus) { showToast('Account (−) is required'); return; }
+  if (value === 0 && document.getElementById('manualValue').value === '') { showToast('Value is required'); return; }
+  if (!label) { showToast('Label is required'); return; }
+  if (!details) { showToast('Details is required'); return; }
+
+  const isTransfer = label.toLowerCase() === 'transfer';
+  const payload = {
+    action: editingRow ? 'update' : 'submit',
+    timestamp: editingRow ? editingRow.timestamp : formatTimestamp(),
+    accountMinus, value, label, details,
+    accountPlus: isTransfer ? accountPlus : '',
+    assetclassdetails: assetclass
+  };
+
+  if (editingRow) {
+    // Edit: awaited so we only confirm after the real row is written.
+    payload.rowIndex = editingRow.rowIndex;
+    const btn = document.getElementById('btnSubmit');
+    btn.disabled = true; btn.textContent = 'Updating...';
+    try {
+      const result = await apiCall(payload);
+      if (result && result.success) {
+        patchCachedByRowIndex(payload.rowIndex, {
+          timestamp: payload.timestamp, accountMinus, value, label, details,
+          accountPlus: payload.accountPlus, assetclassdetails: assetclass
+        });
+        showToast('Updated!');
+        resetForm();
+      } else {
+        showToast('Error: ' + ((result && result.error) || 'Unknown'));
+      }
+    } catch (e) { showToast('Network error'); }
+    btn.disabled = false; btn.textContent = 'Submit';
+    return;
+  }
+
+  // New entry: show instantly, send in the background. The backend dedupes on
+  // the timestamp so a retry never creates a duplicate.
+  const entry = {
+    _id: uid(), _pending: true, _error: false, _payload: payload, rowIndex: null,
+    timestamp: payload.timestamp, accountMinus, value, label, details,
+    accountPlus: payload.accountPlus, assetclassdetails: assetclass
+  };
+  const rows = getCachedRows(); rows.unshift(entry); setCachedRows(rows);
+  showToast('Saved!');
+  resetForm();
+  sendEntry(entry);
+}
+
+async function sendEntry(entry) {
+  try {
+    const result = await apiCall(entry._payload);
+    if (result && result.success) {
+      updateCachedEntry(entry._id, { rowIndex: result.rowIndex, _pending: false, _error: false, _payload: null });
+    } else {
+      updateCachedEntry(entry._id, { _pending: false, _error: true });
+      showToast('⚠ Not saved — open History to retry');
+    }
+  } catch (e) {
+    updateCachedEntry(entry._id, { _pending: false, _error: true });
+    showToast('⚠ Not saved — open History to retry');
+  }
+  if (document.getElementById('viewHistory').classList.contains('active')) {
+    renderRecent(getCachedRows());
+  }
+}
+
+function retryEntry(id) {
+  const rows = getCachedRows();
+  const e = rows.find(r => r._id === id);
+  if (!e || !e._payload) return;
+  updateCachedEntry(id, { _pending: true, _error: false });
+  renderRecent(getCachedRows());
+  sendEntry(e);
+}
+
+// ============================================================
+// FORM HELPERS
+// ============================================================
+function resetForm() {
+  rollAccountMinus.setIndex(0);
+  rollLabelInstance.setIndex(0);
+  rollDetails.setIndex(0);
+  rollAccountPlusInstance.setIndex(0);
+  rollAssetclass.setIndex(0);
+  document.getElementById('freeAccountMinus').value = '';
+  document.getElementById('freeLabel').value = '';
+  document.getElementById('freeDetails').value = '';
+  document.getElementById('freeAccountPlus').value = '';
+  document.getElementById('freeAssetclass').value = '';
+  document.getElementById('manualValue').value = '';
+  setNumIndex(0);
+  isNegative = true;
+  document.getElementById('rollSign').textContent = '−';
+  document.getElementById('rollSign').classList.add('negative');
+  editingRow = null;
+  document.getElementById('btnSubmit').textContent = 'Submit';
+  document.getElementById('btnCancel').classList.add('hidden');
+  updateTransferSections();
+}
+
+function populateForm(row) {
+  editingRow = row;
+  rollAccountMinus.setValue(row.accountMinus || '');
+  rollLabelInstance.setValue(row.label || '');
+  rollDetails.setValue(row.details || '');
+  rollAccountPlusInstance.setValue(row.accountPlus || '');
+  rollAssetclass.setValue(row.assetclassdetails || '');
+
+  const val = parseInt(row.value) || 0;
+  isNegative = val < 0;
+  const absVal = Math.abs(val);
+  document.getElementById('rollSign').textContent = isNegative ? '−' : '+';
+  document.getElementById('rollSign').classList.toggle('negative', isNegative);
+  document.getElementById('manualValue').value = val;
+
+  let closestIdx = 0;
+  let closestDiff = Math.abs(numRollItems[0] - absVal);
+  for (let i = 1; i < numRollItems.length; i++) {
+    const diff = Math.abs(numRollItems[i] - absVal);
+    if (diff < closestDiff) { closestDiff = diff; closestIdx = i; }
+    if (numRollItems[i] > absVal) break;
+  }
+  const track = document.querySelector('#rollValue .num-roll-track');
+  track.style.transition = 'transform 0.3s cubic-bezier(0.23, 1, 0.32, 1)';
+  numCurrentIndex = closestIdx;
+  track.style.transform = `translateY(${-closestIdx * ITEM_HEIGHT + ITEM_HEIGHT}px)`;
+  const items = track.children;
+  for (let i = 0; i < items.length; i++) {
+    items[i].classList.toggle('selected', i === closestIdx);
+  }
+
+  updateTransferSections();
+  document.getElementById('btnSubmit').textContent = 'Update';
+  document.getElementById('btnCancel').classList.remove('hidden');
+  showView('viewForm');
+}
+
+// ============================================================
+// RECENT ENTRIES
+// ============================================================
+function renderRecent(rows) {
+  const list = document.getElementById('recentList');
+  if (!rows || rows.length === 0) {
+    list.innerHTML = '<p style="color:var(--secondary);font-size:14px;">No entries yet.</p>';
+    return;
+  }
+  list.innerHTML = '';
+  rows.forEach(row => {
+    const div = document.createElement('div');
+    div.className = 'recent-entry';
+    const val = parseInt(row.value) || 0;
+    const valClass = val >= 0 ? 'positive' : 'negative';
+    const valStr = val >= 0 ? `+${val}` : `${val}`;
+    let statusHtml = '';
+    if (row._pending) statusHtml = '<div class="re-status saving">saving…</div>';
+    else if (row._error) statusHtml = '<div class="re-status error">not saved · tap to retry</div>';
+    const canDelete = !row._pending && !row._error && row.rowIndex;
+    div.innerHTML = `
+      <div class="re-top">
+        <span class="re-value ${valClass}">${valStr}</span>
+        <span class="re-time">${row.timestamp}</span>
+      </div>
+      <div class="re-details">${row.accountMinus} · ${row.label} · ${row.details}</div>
+      ${statusHtml}
+      ${canDelete ? '<button class="btn-delete-entry">✕</button>' : ''}
+    `;
+
+    if (row._error) {
+      div.addEventListener('click', () => retryEntry(row._id));
+    } else if (!row._pending && row.rowIndex) {
+      div.querySelector('.re-details').addEventListener('click', () => populateForm(row));
+      div.querySelector('.re-top').addEventListener('click', () => populateForm(row));
+    }
+
+    const delBtn = div.querySelector('.btn-delete-entry');
+    if (delBtn) {
+      delBtn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        if (!confirm('Delete this entry?')) return;
+        const btn = e.target;
+        btn.disabled = true; btn.textContent = '...';
+        try {
+          const result = await apiCall({ action: 'delete', rowIndex: row.rowIndex });
+          if (result && result.success) {
+            showToast('Deleted');
+            loadRecent(); // refetch so remaining rowIndexes stay correct
+          } else {
+            showToast('Error: ' + ((result && result.error) || 'Unknown'));
+            btn.disabled = false; btn.textContent = '✕';
+          }
+        } catch (err) {
+          showToast('Network error');
+          btn.disabled = false; btn.textContent = '✕';
+        }
+      });
+    }
+    list.appendChild(div);
+  });
+}
+
+async function loadRecent() {
+  const cached = getCachedRows();
+  if (cached.length) renderRecent(cached);
+  else document.getElementById('recentList').innerHTML = '<div class="spinner"></div>';
+  try {
+    const result = await apiCall({ action: 'getRecent', count: 500 });
+    if (result && result.success) {
+      const server = result.rows || [];
+      const serverKeys = new Set(server.map(rowKey));
+      // Preserve local entries that are not yet on the server (pending/failed).
+      const unsynced = getCachedRows().filter(r => (r._pending || r._error) && !serverKeys.has(rowKey(r)));
+      const merged = unsynced.concat(server);
+      setCachedRows(merged);
+      renderRecent(merged);
+    }
+  } catch (e) {
+    if (!getCachedRows().length) document.getElementById('recentList').innerHTML = '<p>Failed to load.</p>';
+  }
+}
+
+// ============================================================
+// NAVIGATION
+// ============================================================
+function showView(id) {
+  document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+  document.getElementById(id).classList.add('active');
+}
+
+document.getElementById('btnRecent').addEventListener('click', () => {
+  showView('viewHistory');
+  loadRecent();
+});
+document.getElementById('btnNew').addEventListener('click', () => {
+  resetForm();
+  showView('viewForm');
+});
+document.getElementById('btnSubmit').addEventListener('click', handleSubmit);
+document.getElementById('btnCancel').addEventListener('click', resetForm);
+
+// ============================================================
+// CATEGORY EDITOR (add / remove / reorder items per section)
+// ============================================================
+let activeEditorRoll = null;
+let editorDetailsLabel = null;
+
+function activeEditorArray() {
+  if (!activeEditorRoll) return null;
+  if (activeEditorRoll.listKey === 'details') {
+    return LISTS.details[ensureDetailsKey(editorDetailsLabel)];
+  }
+  return LISTS[activeEditorRoll.listKey];
+}
+
+function buildDetailsLabelSelect() {
+  const sel = document.getElementById('editDetailsLabelSelect');
+  sel.innerHTML = '';
+  LISTS.label.forEach(lbl => {
+    const opt = document.createElement('option');
+    opt.value = lbl; opt.textContent = lbl;
+    sel.appendChild(opt);
+  });
+  const match = LISTS.label.find(l => l.toLowerCase() === String(editorDetailsLabel).toLowerCase());
+  sel.value = match || (LISTS.label[0] || '');
+  editorDetailsLabel = sel.value;
+}
+
+function rollByKey(key) {
+  switch (key) {
+    case 'accountMinus': return rollAccountMinus;
+    case 'label': return rollLabelInstance;
+    case 'details': return rollDetails;
+    case 'accountPlus': return rollAccountPlusInstance;
+    case 'assetclass': return rollAssetclass;
+    default: return null;
+  }
+}
+
+function syncAccountLists(sourceKey) {
+  if (sourceKey === 'accountMinus') {
+    const accounts = LISTS.accountMinus.filter(x => String(x).trim() !== '');
+    LISTS.accountPlus = ['', ...accounts];
+  } else if (sourceKey === 'accountPlus') {
+    LISTS.accountMinus = LISTS.accountPlus.filter(x => String(x).trim() !== '');
+  }
+}
+
+function commitListChange() {
+  const key = activeEditorRoll ? activeEditorRoll.listKey : null;
+  if (key === 'accountMinus' || key === 'accountPlus') {
+    syncAccountLists(key);
+    if (rollAccountMinus) rollAccountMinus.refresh();
+    if (rollAccountPlusInstance) rollAccountPlusInstance.refresh();
+  }
+  saveLists();
+  if (activeEditorRoll) activeEditorRoll.refresh();
+  renderEditorList();
+}
+
+function renderEditorList() {
+  if (!activeEditorRoll) return;
+  const items = activeEditorArray();
+  const list = document.getElementById('editModalList');
+  list.innerHTML = '';
+  if (items.length === 0) {
+    list.innerHTML = '<p style="color:var(--secondary);font-size:14px;padding:12px 0;">No categories. Add one below.</p>';
+    return;
+  }
+  items.forEach((item, idx) => {
+    const row = document.createElement('div');
+    row.className = 'modal-item';
+    const isBlank = String(item).trim() === '';
+
+    const handle = document.createElement('span');
+    handle.className = 'drag-handle';
+    handle.textContent = '\u2630';
+    handle.title = 'Drag to reorder';
+    handle.addEventListener('pointerdown', (e) => startReorder(e, idx));
+
+    const name = document.createElement('span');
+    name.className = 'item-name' + (isBlank ? ' blank' : '');
+    name.textContent = isBlank ? '(blank)' : item;
+
+    const del = document.createElement('button');
+    del.title = 'Remove';
+    del.textContent = '\u2715';
+    del.addEventListener('click', () => { items.splice(idx, 1); commitListChange(); haptic(15); });
+
+    row.appendChild(handle);
+    row.appendChild(name);
+    row.appendChild(del);
+    list.appendChild(row);
+  });
+}
+
+let reorder = null;
+function startReorder(e, idx) {
+  if (!activeEditorRoll) return;
+  e.preventDefault();
+  const list = document.getElementById('editModalList');
+  const row = list.children[idx];
+  if (!row) return;
+  reorder = { index: idx, startY: e.clientY, rowHeight: row.offsetHeight || 44 };
+  row.classList.add('dragging');
+  haptic(15);
+  document.addEventListener('pointermove', onReorderMove);
+  document.addEventListener('pointerup', endReorder);
+  document.addEventListener('pointercancel', endReorder);
+}
+function onReorderMove(e) {
+  if (!reorder) return;
+  e.preventDefault();
+  const list = document.getElementById('editModalList');
+  const items = activeEditorArray();
+  const row = list.children[reorder.index];
+  if (!row) return;
+  const delta = e.clientY - reorder.startY;
+  row.style.transform = `translateY(${delta}px)`;
+  let target = reorder.index + Math.round(delta / reorder.rowHeight);
+  target = Math.max(0, Math.min(items.length - 1, target));
+  if (target !== reorder.index) {
+    const [moved] = items.splice(reorder.index, 1);
+    items.splice(target, 0, moved);
+    reorder.index = target;
+    reorder.startY = e.clientY;
+    renderEditorList();
+    const newRow = list.children[target];
+    if (newRow) { newRow.classList.add('dragging'); newRow.style.transform = 'translateY(0px)'; }
+    haptic(8);
+  }
+}
+function endReorder() {
+  if (!reorder) return;
+  document.removeEventListener('pointermove', onReorderMove);
+  document.removeEventListener('pointerup', endReorder);
+  document.removeEventListener('pointercancel', endReorder);
+  reorder = null;
+  commitListChange();
+  haptic(15);
+}
+
+function openCategoryEditor(key) {
+  const roll = rollByKey(key);
+  if (!roll) return;
+  activeEditorRoll = roll;
+  document.getElementById('editModalTitle').textContent = 'Edit ' + (LIST_TITLES[key] || key);
+  document.getElementById('editModalInput').value = '';
+  const detailsRow = document.getElementById('editDetailsLabelRow');
+  if (key === 'details') {
+    editorDetailsLabel = currentLabel() || (LISTS.label[0] || '');
+    buildDetailsLabelSelect();
+    detailsRow.classList.remove('hidden');
+  } else {
+    detailsRow.classList.add('hidden');
+  }
+  renderEditorList();
+  document.getElementById('editModal').classList.remove('hidden');
+}
+
+function closeCategoryEditor() {
+  document.getElementById('editModal').classList.add('hidden');
+  activeEditorRoll = null;
+}
+
+function addCategory() {
+  if (!activeEditorRoll) return;
+  const input = document.getElementById('editModalInput');
+  const val = input.value.trim();
+  if (!val) return;
+  const items = activeEditorArray();
+  if (items.some(i => String(i).toLowerCase() === val.toLowerCase())) { showToast('Already exists'); return; }
+  items.push(val);
+  commitListChange();
+  input.value = '';
+  haptic(15);
+}
+
+function resetActiveList() {
+  if (!activeEditorRoll) return;
+  const key = activeEditorRoll.listKey;
+  if (key === 'details') {
+    const lbl = editorDetailsLabel;
+    if (!confirm('Reset details for "' + lbl + '" to the built-in defaults? This discards your changes for this label.')) return;
+    const defKey = Object.keys(DEFAULT_LISTS.details).find(k => k.toLowerCase() === String(lbl).toLowerCase());
+    LISTS.details[ensureDetailsKey(lbl)] = defKey ? DEFAULT_LISTS.details[defKey].slice() : [];
+    commitListChange();
+    haptic(20);
+    showToast('Reset to defaults');
+    return;
+  }
+  const title = LIST_TITLES[key] || key;
+  if (!confirm('Reset "' + title + '" to the built-in defaults? This discards your changes for this section.')) return;
+  LISTS[key] = DEFAULT_LISTS[key].slice();
+  commitListChange();
+  haptic(20);
+  showToast('Reset to defaults');
+}
+
+// ============================================================
+// EXPORT CATEGORIES
+// ============================================================
+function openExport() {
+  document.getElementById('exportText').value = JSON.stringify(LISTS, null, 2);
+  document.getElementById('exportModal').classList.remove('hidden');
+}
+function closeExport() {
+  document.getElementById('exportModal').classList.add('hidden');
+}
+function copyExport() {
+  const ta = document.getElementById('exportText');
+  const text = ta.value;
+  const fallback = () => {
+    ta.removeAttribute('readonly'); ta.select(); ta.setSelectionRange(0, text.length);
+    try { document.execCommand('copy'); } catch (e) {}
+    ta.setAttribute('readonly', ''); window.getSelection().removeAllRanges();
+  };
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(() => showToast('Copied')).catch(() => { fallback(); showToast('Copied'); });
+  } else { fallback(); showToast('Copied'); }
+  haptic(15);
+}
+
+function initCategoryEditor() {
+  document.querySelectorAll('.edit-btn').forEach(btn => {
+    btn.addEventListener('click', () => openCategoryEditor(btn.dataset.roll));
+  });
+  document.getElementById('editModalClose').addEventListener('click', closeCategoryEditor);
+  document.getElementById('editModalReset').addEventListener('click', resetActiveList);
+  document.getElementById('editModalAdd').addEventListener('click', addCategory);
+  document.getElementById('editDetailsLabelSelect').addEventListener('change', (e) => {
+    editorDetailsLabel = e.target.value;
+    renderEditorList();
+  });
+  document.getElementById('editModalInput').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') addCategory();
+  });
+  document.getElementById('editModal').addEventListener('click', (e) => {
+    if (e.target.id === 'editModal') closeCategoryEditor();
+  });
+  document.getElementById('btnExport').addEventListener('click', openExport);
+  document.getElementById('exportModalClose').addEventListener('click', closeExport);
+  document.getElementById('exportCopy').addEventListener('click', copyExport);
+  document.getElementById('exportModal').addEventListener('click', (e) => {
+    if (e.target.id === 'exportModal') closeExport();
+  });
+}
+
+// ============================================================
+// TOAST
+// ============================================================
+function showToast(msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  setTimeout(() => t.classList.remove('show'), 2500);
+}
+
+// ============================================================
+// INIT
+// ============================================================
+let rollAccountMinus, rollLabelInstance, rollDetails, rollAccountPlusInstance, rollAssetclass;
+
+document.addEventListener('DOMContentLoaded', () => {
+  rollAccountMinus = new TextRoll('rollAccountMinus', 'accountMinus', 'freeAccountMinus');
+  rollLabelInstance = new TextRoll('rollLabel', 'label', 'freeLabel');
+  rollDetails = new TextRoll('rollDetails', 'details', 'freeDetails', currentDetailsList);
+  rollAssetclass = new TextRoll('rollAssetclass', 'assetclass', 'freeAssetclass');
+  rollAccountPlusInstance = new TextRoll('rollAccountPlus', 'accountPlus', 'freeAccountPlus');
+  rollLabelInstance.onChange = refreshDetailsForLabel;
+  document.getElementById('freeLabel').addEventListener('input', refreshDetailsForLabel);
+  refreshDetailsForLabel();
+  buildNumRoll();
+  initNumRollTouch();
+  initCategoryEditor();
+});
+</script>
+</body>
+</html>
