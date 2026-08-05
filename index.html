@@ -260,7 +260,7 @@ body {
   <div class="header-left">
     <button id="btnRecent">History</button>
   </div>
-  <h1>Expense Tracker v2</h1>
+  <h1>Expense Tracker v3</h1>
   <button id="btnNew">+ New</button>
 </div>
 
@@ -970,11 +970,9 @@ function retryEntry(id) {
 // entry (with a warning) if the server delete fails. The backend verifies the
 // row by content, so it never deletes the wrong row even if numbers shifted.
 // ============================================================
-function sameCachedRow(a, b) {
-  if (a._id && b._id) return a._id === b._id;
-  if (a.rowIndex && b.rowIndex) return Number(a.rowIndex) === Number(b.rowIndex);
-  return rowKey(a) === rowKey(b);
-}
+// rowKeys of deletes that are in flight, so a background refresh can't flash
+// them back before the server confirms the row is gone.
+const pendingDeleteKeys = new Set();
 
 function restoreDeletedEntry(removed, idx) {
   const rows = getCachedRows();
@@ -987,12 +985,19 @@ function restoreDeletedEntry(removed, idx) {
 }
 
 function optimisticDelete(row) {
+  const key = rowKey(row);
   const rows = getCachedRows();
-  const idx = rows.findIndex(r => sameCachedRow(r, row));
+  // Identify the row by identity (optimistic _id) or content, NEVER by the
+  // sheet row number, which shifts when other rows are deleted.
+  const idx = rows.findIndex(r => (r._id && row._id) ? r._id === row._id : rowKey(r) === key);
   const removed = idx >= 0 ? rows[idx] : Object.assign({}, row);
-  if (idx >= 0) { rows.splice(idx, 1); setCachedRows(rows); renderRecent(getCachedRows()); }
+  if (idx >= 0) { rows.splice(idx, 1); setCachedRows(rows); }
+  pendingDeleteKeys.add(key);
+  renderRecent(getCachedRows());
   showToast('Deleted');
 
+  // rowIndex is only a hint; the backend re-verifies by content and relocates
+  // if it shifted, so a stale hint can never delete the wrong row.
   const payload = {
     action: 'delete',
     rowIndex: row.rowIndex,
@@ -1003,19 +1008,16 @@ function optimisticDelete(row) {
   };
   apiCall(payload).then(result => {
     if (result && result.success) {
-      // A delete renumbers rows below it, keep the remaining cached rowIndexes
-      // correct so later edits/deletes this session still target the right row.
-      const del = Number(result.deletedRow || row.rowIndex);
-      if (del) {
-        const cur = getCachedRows();
-        cur.forEach(r => { if (r.rowIndex && Number(r.rowIndex) > del) r.rowIndex = Number(r.rowIndex) - 1; });
-        setCachedRows(cur);
-      }
+      // Reconcile fresh row numbers in the background (so later edits target the
+      // right row). The tombstone keeps this row from flashing back meanwhile.
+      loadRecent().finally(() => pendingDeleteKeys.delete(key));
     } else {
+      pendingDeleteKeys.delete(key);
       restoreDeletedEntry(removed, idx);
       showToast('⚠ Delete failed — entry restored');
     }
   }).catch(() => {
+    pendingDeleteKeys.delete(key);
     restoreDeletedEntry(removed, idx);
     showToast('⚠ Delete failed — entry restored');
   });
@@ -1139,7 +1141,8 @@ async function loadRecent() {
   try {
     const result = await apiCall({ action: 'getRecent', count: 500 });
     if (result && result.success) {
-      const server = result.rows || [];
+      // Drop any rows whose delete is still in flight so they don't reappear.
+      const server = (result.rows || []).filter(r => !pendingDeleteKeys.has(rowKey(r)));
       const serverKeys = new Set(server.map(rowKey));
       // Preserve local entries that are not yet on the server (pending/failed).
       const unsynced = getCachedRows().filter(r => (r._pending || r._error) && !serverKeys.has(rowKey(r)));

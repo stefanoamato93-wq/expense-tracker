@@ -15,6 +15,11 @@ roll-picker form and History, but **no query engine and no separate database**.
 | Submit UX | Awaited (felt slow when the deployment was cold) | **Optimistic** (instant), idempotent server write |
 | Delete UX | Awaited + full refetch | **Optimistic** (instant), content-verified server delete, restores on failure |
 
+> v3 fixes a sequential-delete bug: rows are now matched by content (not by the
+> sheet row number, which shifts as rows are deleted), in-flight deletes are
+> tombstoned so a background refresh can't flash them back, and row numbers are
+> reconciled by a background refetch after each delete.
+
 Three things drive the speed:
 
 1. **Smaller, single-scope backend.** Dropping `openById` means the script only
