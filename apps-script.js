@@ -10,6 +10,9 @@
  *  - Safe optimistic UI: submit is idempotent (a retried submit with the same
  *    timestamp will NOT create a duplicate row), so the frontend can send in the
  *    background and retry failures without ever double-writing.
+ *  - lean-v3: every write runs under a script lock (concurrent submits could
+ *    otherwise overwrite each other's row), and a `sync` action flushes all
+ *    queued entries AND returns the History tail in ONE round trip.
  *
  * SETUP:
  * 1. Google Sheet with headers in row 1 of tab "Sheet1":
@@ -22,8 +25,10 @@
  */
 
 const SHEET_NAME = 'Sheet1';
-const BACKEND_VERSION = 'lean-v2';
+const BACKEND_VERSION = 'lean-v3';
 const N_COLS = 7; // A..G
+const DEDUPE_WINDOW = 300; // tail rows checked to make submits idempotent
+const LOCK_WAIT_MS = 20000;
 
 function doGet() {
   return jsonOut_({
@@ -40,9 +45,10 @@ function doPost(e) {
     if (!sheet) throw new Error('Sheet "' + SHEET_NAME + '" not found.');
 
     switch (data.action) {
-      case 'submit':   return jsonOut_(handleSubmit_(sheet, data));
-      case 'update':   return jsonOut_(handleUpdate_(sheet, data));
-      case 'delete':   return jsonOut_(handleDelete_(sheet, data));
+      case 'sync':     return jsonOut_(handleSync_(sheet, data));
+      case 'submit':   return jsonOut_(withLock_(() => handleSubmit_(sheet, data)));
+      case 'update':   return jsonOut_(withLock_(() => handleUpdate_(sheet, data)));
+      case 'delete':   return jsonOut_(withLock_(() => handleDelete_(sheet, data)));
       case 'getRecent':return jsonOut_(handleGetRecent_(sheet, data));
       default:
         return jsonOut_({ success: false, error: 'Unknown action', backendVersion: BACKEND_VERSION });
@@ -56,22 +62,25 @@ function doPost(e) {
 // Actions
 // ------------------------------------------------------------
 
+// Single submit. Callers MUST hold the script lock (see withLock_), otherwise
+// two concurrent submits read the same getLastRow() and the second overwrites
+// the first.
 function handleSubmit_(sheet, data) {
-  const row = rowFromData_(data);
+  return writeEntry_(sheet, data, buildTailIndex_(sheet));
+}
 
-  // Idempotency: if an identical row (same timestamp/account/value/label) is
-  // already among the last rows, this is a retry of a submit that actually
-  // succeeded, return that row instead of writing a duplicate.
-  const dup = findRecentDuplicate_(sheet, data.timestamp, data.accountMinus, data.value, data.label);
-  if (dup) return { success: true, rowIndex: dup, deduped: true };
+// Write one entry (plus the transfer mirror row) unless it is already in the
+// tail index. Idempotent: a retry of a submit that actually landed returns the
+// existing row instead of writing a duplicate.
+function writeEntry_(sheet, data, index) {
+  const key = entryKey_(data.timestamp, data.accountMinus, data.value, data.label);
+  if (index.has(key)) return { success: true, rowIndex: index.get(key), deduped: true };
 
-  const lastRow = sheet.getLastRow();
-  const target = lastRow + 1;
-  sheet.getRange(target, 1, 1, N_COLS).setValues([row]);
-
+  const target = sheet.getLastRow() + 1;
+  const rows = [rowFromData_(data)];
   // Transfer: also write the mirror row (swapped accounts, negated value).
   if (String(data.label).toLowerCase() === 'transfer' && data.accountPlus) {
-    const mirror = [
+    rows.push([
       data.timestamp,
       data.accountPlus,
       -Number(data.value),
@@ -79,10 +88,41 @@ function handleSubmit_(sheet, data) {
       data.details,
       data.accountMinus,
       data.assetclassdetails || ''
-    ];
-    sheet.getRange(target + 1, 1, 1, N_COLS).setValues([mirror]);
+    ]);
   }
+  sheet.getRange(target, 1, rows.length, N_COLS).setValues(rows);
+  index.set(key, target);
   return { success: true, rowIndex: target };
+}
+
+// One round trip for the frontend: flush every queued entry (under the lock,
+// idempotent), then return the fresh History tail. Opening History or retrying
+// several unsaved entries costs a single Apps Script call instead of N+1.
+function handleSync_(sheet, data) {
+  const entries = Array.isArray(data.entries) ? data.entries : [];
+  const results = [];
+  if (entries.length) {
+    withLock_(() => {
+      const index = buildTailIndex_(sheet);
+      entries.forEach(p => {
+        try {
+          const r = writeEntry_(sheet, p, index);
+          results.push({ id: p.id, success: true, rowIndex: r.rowIndex, deduped: !!r.deduped });
+        } catch (err) {
+          results.push({ id: p.id, success: false, error: String(err) });
+        }
+      });
+      SpreadsheetApp.flush();
+    });
+  }
+  const recent = handleGetRecent_(sheet, data);
+  return {
+    success: true,
+    backendVersion: BACKEND_VERSION,
+    results: results,
+    rows: recent.rows,
+    total: recent.total
+  };
 }
 
 function handleUpdate_(sheet, data) {
@@ -149,9 +189,15 @@ function handleGetRecent_(sheet, data) {
 
   const count = Math.max(1, Math.min(Number(data.count) || 500, total));
   const startRow = lastRow - count + 1;
-  const rows = sheet.getRange(startRow, 1, count, N_COLS).getDisplayValues();
+  const range = sheet.getRange(startRow, 1, count, N_COLS);
+  const rows = range.getDisplayValues();
+  // Raw column A, normalised to the client's "M/D/YYYY H:MM:SS" format, so the
+  // app can match its own unsynced entries to server rows regardless of how the
+  // sheet's locale displays the timestamp.
+  const rawTs = sheet.getRange(startRow, 1, count, 1).getValues();
   const result = rows.map((r, i) => ({
     rowIndex: startRow + i, // absolute sheet row (needed for edit/delete)
+    ts: formatTs_(rawTs[i][0]),
     timestamp: r[0],
     accountMinus: r[1],
     value: r[2],
@@ -179,21 +225,48 @@ function rowFromData_(data) {
   ];
 }
 
-// Look at the last N rows for an identical entry to make submit idempotent.
-function findRecentDuplicate_(sheet, ts, account, value, label) {
+function withLock_(fn) {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(LOCK_WAIT_MS); // throws if busy for too long -> client retries
+  try { return fn(); } finally { lock.releaseLock(); }
+}
+
+function entryKey_(ts, account, value, label) {
+  return [formatTs_(ts), String(account), Number(value), String(label)].join('|');
+}
+
+// Map of entryKey -> absolute row for the last DEDUPE_WINDOW rows, read once
+// per request. Wide window so a retry sent hours later still dedupes.
+function buildTailIndex_(sheet) {
+  const index = new Map();
   const lastRow = sheet.getLastRow();
-  const n = Math.min(40, lastRow - 1);
-  if (n < 1) return 0;
-  const vals = sheet.getRange(lastRow - n + 1, 1, n, 4).getValues(); // A..D
-  for (let i = n - 1; i >= 0; i--) {
-    if (formatTs_(vals[i][0]) === String(ts) &&
-        String(vals[i][1]) === String(account) &&
-        Number(vals[i][2]) === Number(value) &&
-        String(vals[i][3]) === String(label)) {
-      return lastRow - n + 1 + i;
+  const n = Math.min(DEDUPE_WINDOW, lastRow - 1);
+  if (n < 1) return index;
+  const start = lastRow - n + 1;
+  const vals = sheet.getRange(start, 1, n, 4).getValues(); // A..D
+  for (let i = 0; i < n; i++) {
+    const v = vals[i];
+    const k = entryKey_(v[0], v[1], v[2], v[3]);
+    if (!index.has(k)) index.set(k, start + i); // first = the non-mirror row
+    // A text timestamp like "9/10/2026 ..." can be auto-parsed by a D/M sheet
+    // locale as 9 October. Also index the day/month-swapped reading so a retry
+    // of that entry still dedupes.
+    const sw = swappedTs_(v[0]);
+    if (sw) {
+      const k2 = [sw, String(v[1]), Number(v[2]), String(v[3])].join('|');
+      if (!index.has(k2)) index.set(k2, start + i);
     }
   }
-  return 0;
+  return index;
+}
+
+function swappedTs_(v) {
+  if (!(v instanceof Date) || isNaN(v.getTime())) return null;
+  const d = v.getDate(), m = v.getMonth() + 1;
+  if (d > 12 || d === m) return null;
+  const pad = (x) => ('0' + x).slice(-2);
+  return d + '/' + m + '/' + v.getFullYear() +
+         ' ' + v.getHours() + ':' + pad(v.getMinutes()) + ':' + pad(v.getSeconds());
 }
 
 // Normalise a timestamp cell (Date or text) to the client's

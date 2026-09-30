@@ -135,6 +135,17 @@ body {
 .recent-entry .re-status { font-size: 11px; font-weight: 600; margin-top: 2px; }
 .recent-entry .re-status.saving { color: var(--secondary); }
 .recent-entry .re-status.error { color: var(--danger); }
+.history-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+.sync-status {
+  background: none; border: none; padding: 0 0 4px; font: inherit;
+  font-size: 11px; color: var(--secondary); cursor: pointer; text-align: right;
+}
+.sync-status.failed { color: var(--danger); }
+.btn-more {
+  display: block; width: 100%; margin-top: 8px; padding: 10px; border: none;
+  border-radius: 10px; background: var(--bg); color: var(--primary);
+  font-size: 14px; font-weight: 500; cursor: pointer;
+}
 .btn-delete-entry {
   position: absolute; right: 0; top: 50%; transform: translateY(-50%);
   width: 32px; height: 32px; border-radius: 16px; border: none;
@@ -260,7 +271,7 @@ body {
   <div class="header-left">
     <button id="btnRecent">History</button>
   </div>
-  <h1>Expense Tracker v3</h1>
+  <h1>Expense Tracker v4</h1>
   <button id="btnNew">+ New</button>
 </div>
 
@@ -364,7 +375,10 @@ body {
 <div id="viewHistory" class="view">
 <div class="container">
   <div class="card">
-    <div class="field-label">Recent Entries</div>
+    <div class="history-head">
+      <div class="field-label">Recent Entries</div>
+      <button id="syncStatus" class="sync-status" type="button" aria-live="polite"></button>
+    </div>
     <div id="recentList"><div class="spinner"></div></div>
   </div>
 </div>
@@ -820,13 +834,31 @@ document.getElementById('manualValue').addEventListener('input', (e) => {
 // ============================================================
 // API + TIMESTAMP
 // ============================================================
-async function apiCall(data) {
-  const resp = await fetch(SCRIPT_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'text/plain' },
-    body: JSON.stringify(data)
-  });
-  return await resp.json();
+// Hard timeouts so a hung Apps Script call can never leave an entry stuck on
+// "saving…". A write that times out but actually landed is harmless: the
+// retry is deduped server-side.
+const READ_TIMEOUT_MS = 20000;
+const WRITE_TIMEOUT_MS = 35000;
+
+async function apiCall(data, timeoutMs) {
+  const ctrl = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+  const timer = ctrl ? setTimeout(() => ctrl.abort(), timeoutMs || WRITE_TIMEOUT_MS) : null;
+  try {
+    const resp = await fetch(SCRIPT_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain' },
+      body: JSON.stringify(data),
+      cache: 'no-store',
+      signal: ctrl ? ctrl.signal : undefined
+    });
+    // Apps Script sometimes answers with an HTML error page (quota, cold
+    // start hiccup). Treat anything that is not JSON as a retryable failure.
+    const text = await resp.text();
+    try { return JSON.parse(text); }
+    catch (e) { throw new Error('Bad response (HTTP ' + resp.status + ')'); }
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 function formatTimestamp() {
@@ -841,41 +873,267 @@ function formatTimestamp() {
 }
 
 // ============================================================
-// HISTORY CACHE (per-device localStorage; mirrors last getRecent)
-// Also holds not-yet-synced optimistic entries so nothing is lost offline.
+// HISTORY CACHE (per-device localStorage; mirrors the last server tail)
+// Also holds the OUTBOX: entries not yet confirmed by the server (they carry a
+// `_payload`). Kept in memory too, so renders and patches don't re-parse the
+// whole cache from localStorage on every call.
 // ============================================================
 const RECENT_CACHE_KEY = 'expenseTrackerRecentCache';
+const HISTORY_FETCH = 500;  // rows pulled from the sheet tail
+const HISTORY_PAGE = 100;   // rows rendered per "Show more" step
+const RETRY_DELAYS_MS = [3000, 10000, 30000, 60000, 120000];
+const FRESH_MS = 15000;     // skip a History refetch if synced this recently
+
+let CACHE_ROWS = null;
+let lastSyncAt = 0;         // ms of the last successful server refresh
 
 function getCachedRows() {
-  try { const c = JSON.parse(localStorage.getItem(RECENT_CACHE_KEY)); if (c && Array.isArray(c.rows)) return c.rows; } catch (e) {}
-  return [];
+  if (!CACHE_ROWS) {
+    CACHE_ROWS = [];
+    try {
+      const c = JSON.parse(localStorage.getItem(RECENT_CACHE_KEY));
+      if (c && Array.isArray(c.rows)) { CACHE_ROWS = c.rows; lastSyncAt = Number(c.syncedAt) || 0; }
+    } catch (e) {}
+  }
+  return CACHE_ROWS;
 }
 function setCachedRows(rows) {
-  try { localStorage.setItem(RECENT_CACHE_KEY, JSON.stringify({ rows: rows, at: Date.now() })); } catch (e) {}
-}
-function updateCachedEntry(id, patch) {
-  const rows = getCachedRows();
-  const i = rows.findIndex(r => r._id === id);
-  if (i >= 0) { Object.assign(rows[i], patch); setCachedRows(rows); }
+  CACHE_ROWS = rows;
+  try {
+    localStorage.setItem(RECENT_CACHE_KEY, JSON.stringify({ rows: rows, at: Date.now(), syncedAt: lastSyncAt }));
+  } catch (e) {}
 }
 function patchCachedByRowIndex(rowIndex, patch) {
   const rows = getCachedRows();
-  const i = rows.findIndex(r => Number(r.rowIndex) === Number(rowIndex));
+  const i = rows.findIndex(r => !r._payload && Number(r.rowIndex) === Number(rowIndex));
   if (i >= 0) { Object.assign(rows[i], patch); setCachedRows(rows); }
 }
 function uid() { return 'c' + Date.now() + Math.random().toString(36).slice(2, 7); }
-function rowKey(r) {
-  return [String(r.timestamp), String(r.accountMinus), String(parseInt(r.value) || 0), String(r.label), String(r.details)].join('|');
+function isUnsynced(r) { return !!(r && r._payload); }
+function outboxCount() { return getCachedRows().filter(isUnsynced).length; }
+function historyVisible() { return document.getElementById('viewHistory').classList.contains('active'); }
+function refreshHistoryView() { if (historyVisible()) renderRecent(getCachedRows()); }
+
+// ------------------------------------------------------------
+// Matching local entries to server rows.
+// The sheet can DISPLAY values differently from what the app sent (timestamp
+// in the sheet's locale, D/M instead of M/D, no seconds, "1.234" or "-12,00"
+// for values). v3 compared raw strings, so an entry whose response was lost
+// stayed "not saved" forever even though the row was in the sheet. Compare
+// normalised parts instead.
+// ------------------------------------------------------------
+function toNum(v) {
+  let s = String(v === undefined || v === null ? '' : v).replace(/[^\d,.\-]/g, '');
+  const m = s.match(/^(-?[\d.,]*?)[.,](\d{1,2})$/); // trailing 1-2 digits = decimals
+  s = m ? m[1].replace(/[.,]/g, '') + '.' + m[2] : s.replace(/[.,]/g, '');
+  const n = parseFloat(s);
+  return isNaN(n) ? 0 : n;
+}
+function contentKey(r) {
+  return [
+    String(r.accountMinus || '').trim(),
+    String(Math.round(toNum(r.value))),
+    String(r.label || '').trim(),
+    String(r.details || '').trim()
+  ].join('|');
+}
+function tsParts(s) {
+  const m = String(s || '').trim()
+    .match(/^(\d{1,4})[\/.\-](\d{1,2})[\/.\-](\d{1,4})[ T,]+(\d{1,2})[:.](\d{1,2})(?:[:.](\d{1,2}))?/);
+  if (!m) return [];
+  const t = { h: +m[4], mi: +m[5], s: m[6] === undefined ? null : +m[6] };
+  if (m[1].length === 4) return [Object.assign({ y: +m[1], mo: +m[2], d: +m[3] }, t)];
+  let y = +m[3]; if (y < 100) y += 2000;
+  const out = [Object.assign({ y: y, mo: +m[1], d: +m[2] }, t)];               // M/D (app format)
+  if (m[1] !== m[2]) out.push(Object.assign({ y: y, mo: +m[2], d: +m[1] }, t)); // D/M (sheet locale)
+  return out;
+}
+function tsCands(r) { return tsParts(r.ts).concat(tsParts(r.timestamp)); }
+function sameEntry(a, b) {
+  if (contentKey(a) !== contentKey(b)) return false;
+  const A = tsCands(a), B = tsCands(b);
+  if (!A.length || !B.length) return String(a.timestamp) === String(b.timestamp);
+  return A.some(x => B.some(y =>
+    x.y === y.y && x.mo === y.mo && x.d === y.d && x.h === y.h && x.mi === y.mi &&
+    (x.s === null || y.s === null || x.s === y.s)));
 }
 
-// Any entry still marked in-flight from a previous session can never resolve,
-// so flip it to an error state (tap-to-retry) on load. No data is lost.
-(function reconcilePendingOnLoad() {
+// v3 marked in-flight entries `_pending` and flipped them to "not saved" on
+// every reload, and nothing retried them. v4 keeps them in the outbox and
+// resends automatically (the backend dedupes, so this is always safe).
+(function migrateCacheOnLoad() {
   const rows = getCachedRows();
   let changed = false;
-  rows.forEach(r => { if (r._pending) { r._pending = false; r._error = true; changed = true; } });
+  rows.forEach(r => {
+    if (r._pending !== undefined) { delete r._pending; changed = true; }
+    if (r._sending) { r._sending = false; changed = true; }
+    if (!r._payload && r._error) { r._error = false; changed = true; }
+    if (r._payload && !r.ts) { r.ts = r._payload.timestamp; changed = true; }
+  });
   if (changed) setCachedRows(rows);
 })();
+
+// ============================================================
+// SYNC ENGINE
+// One request at a time (single-flight), so overlapping refreshes can never
+// overwrite each other. Each run flushes the whole outbox AND pulls the fresh
+// History tail in ONE Apps Script call (`sync`, backend lean-v3). Falls back to
+// submit-per-entry + getRecent if the deployed backend is still lean-v2.
+// Failures retry automatically with backoff, and again whenever the app comes
+// back to the foreground or the phone goes back online.
+// ============================================================
+let syncInFlight = false;
+let syncWaiters = [];
+let retryTimer = null;
+let retryStep = 0;
+let legacyBackend = false;
+let lastSyncFailed = false;
+
+function requestSync() {
+  return new Promise(resolve => {
+    syncWaiters.push(resolve);
+    if (!syncInFlight) runSync();
+  });
+}
+// Refresh unless a request is already running (its answer is fresh enough).
+function refreshIfIdle() { if (!syncInFlight) requestSync(); }
+
+async function runSync() {
+  syncInFlight = true;
+  if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
+  const waiters = syncWaiters; syncWaiters = [];
+  let ok = false;
+  try { ok = await doSync(); } catch (e) { ok = false; }
+  syncInFlight = false;
+  lastSyncFailed = !ok;
+  updateSyncStatus();
+  waiters.forEach(w => { try { w(ok); } catch (e) {} });
+  if (syncWaiters.length) { runSync(); return; }
+  scheduleRetry();
+}
+
+function scheduleRetry() {
+  if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
+  if (!outboxCount()) { retryStep = 0; return; }
+  if (document.visibilityState === 'hidden') return; // resumes on visibilitychange
+  const delay = RETRY_DELAYS_MS[Math.min(retryStep, RETRY_DELAYS_MS.length - 1)];
+  retryStep++;
+  retryTimer = setTimeout(() => { retryTimer = null; requestSync(); }, delay);
+}
+
+function markFailed(e) {
+  e._error = true;
+  e._attempts = (e._attempts || 0) + 1;
+  if (e._attempts === 1 && !historyVisible()) showToast('⚠ Not saved yet · retrying automatically');
+}
+
+async function doSync() {
+  const queue = getCachedRows().filter(isUnsynced);
+  queue.forEach(e => { e._sending = true; });
+  updateSyncStatus(true);
+  refreshHistoryView();
+
+  let result = null;
+  try {
+    if (!legacyBackend) {
+      result = await apiCall({
+        action: 'sync',
+        count: HISTORY_FETCH,
+        entries: queue.map(e => Object.assign({ id: e._id }, e._payload))
+      }, queue.length ? WRITE_TIMEOUT_MS : READ_TIMEOUT_MS);
+      if (result && result.success === false && /unknown action/i.test(String(result.error || ''))) {
+        legacyBackend = true;
+        result = null;
+      }
+    }
+    if (legacyBackend) result = await legacySync(queue);
+  } catch (err) {
+    result = null;
+  }
+
+  queue.forEach(e => { e._sending = false; });
+  if (!result || !result.success) {
+    queue.forEach(markFailed);
+    setCachedRows(getCachedRows());
+    refreshHistoryView();
+    return false;
+  }
+
+  const byId = {};
+  (result.results || []).forEach(r => { byId[r.id] = r; });
+  queue.forEach(e => {
+    const r = byId[e._id];
+    if (r && r.success) {
+      e._payload = null; e._error = false; e._attempts = 0;
+      if (r.rowIndex) e.rowIndex = r.rowIndex;
+    } else {
+      markFailed(e);
+    }
+  });
+
+  if (Array.isArray(result.rows)) {
+    mergeServerRows(result.rows);
+  } else {
+    setCachedRows(getCachedRows());
+  }
+  refreshHistoryView();
+  return Array.isArray(result.rows) && !queue.some(isUnsynced);
+}
+
+// lean-v2 backend: one submit per queued entry, then getRecent.
+async function legacySync(queue) {
+  const results = [];
+  for (const e of queue) {
+    try {
+      const r = await apiCall(e._payload, WRITE_TIMEOUT_MS);
+      results.push({ id: e._id, success: !!(r && r.success), rowIndex: r && r.rowIndex });
+    } catch (err) {
+      results.push({ id: e._id, success: false });
+    }
+  }
+  let rows;
+  try {
+    const g = await apiCall({ action: 'getRecent', count: HISTORY_FETCH }, READ_TIMEOUT_MS);
+    if (g && g.success) rows = g.rows;
+  } catch (err) {}
+  return { success: true, results: results, rows: rows };
+}
+
+// Server rows are the truth. Keep local outbox entries only if the server
+// does not already have them (if it does, the save landed and just its
+// response was lost), and hide rows whose delete is still in flight.
+function mergeServerRows(serverRows) {
+  const server = serverRows.filter(s => !pendingDeletes.some(t => sameEntry(t, s)));
+  const byContent = new Map();
+  server.forEach(s => {
+    const k = contentKey(s);
+    if (!byContent.has(k)) byContent.set(k, []);
+    byContent.get(k).push(s);
+  });
+  const unsynced = getCachedRows().filter(r =>
+    isUnsynced(r) && !(byContent.get(contentKey(r)) || []).some(s => sameEntry(r, s)));
+  lastSyncAt = Date.now();
+  setCachedRows(unsynced.concat(server));
+}
+
+function updateSyncStatus(busy) {
+  const el = document.getElementById('syncStatus');
+  if (!el) return;
+  const n = outboxCount();
+  const waiting = n ? ` · ${n} waiting to save` : '';
+  let text;
+  if (busy || syncInFlight) text = n ? `Saving ${n}…` : 'Refreshing…';
+  else if (lastSyncFailed) text = n ? `${n} not saved · tap to retry` : 'Offline · tap to retry';
+  else if (lastSyncAt) text = 'Updated ' + fmtSyncTime(lastSyncAt) + waiting;
+  else text = waiting ? waiting.slice(3) : '';
+  el.textContent = text;
+  el.classList.toggle('failed', !busy && !syncInFlight && (lastSyncFailed || n > 0));
+}
+function fmtSyncTime(ms) {
+  const d = new Date(ms), now = new Date();
+  const hm = d.getHours() + ':' + String(d.getMinutes()).padStart(2, '0');
+  return d.toDateString() === now.toDateString() ? hm : `${d.getDate()}/${d.getMonth() + 1} ${hm}`;
+}
 
 // ============================================================
 // SUBMIT (optimistic for new entries, awaited for edits)
@@ -908,7 +1166,7 @@ async function handleSubmit() {
     const btn = document.getElementById('btnSubmit');
     btn.disabled = true; btn.textContent = 'Updating...';
     try {
-      const result = await apiCall(payload);
+      const result = await apiCall(payload, WRITE_TIMEOUT_MS);
       if (result && result.success) {
         patchCachedByRowIndex(payload.rowIndex, {
           timestamp: payload.timestamp, accountMinus, value, label, details,
@@ -916,52 +1174,34 @@ async function handleSubmit() {
         });
         showToast('Updated!');
         resetForm();
+        requestSync(); // pull the edited row back so the cache matches the sheet
       } else {
         showToast('Error: ' + ((result && result.error) || 'Unknown'));
       }
-    } catch (e) { showToast('Network error'); }
-    btn.disabled = false; btn.textContent = 'Submit';
+    } catch (e) { showToast('Network error · not updated'); }
+    btn.disabled = false; btn.textContent = editingRow ? 'Update' : 'Submit';
     return;
   }
 
-  // New entry: show instantly, send in the background. The backend dedupes on
-  // the timestamp so a retry never creates a duplicate.
+  // New entry: into the outbox and History instantly, sent in the background.
+  // The backend dedupes on timestamp+content, so retries never duplicate.
   const entry = {
-    _id: uid(), _pending: true, _error: false, _payload: payload, rowIndex: null,
-    timestamp: payload.timestamp, accountMinus, value, label, details,
+    _id: uid(), _payload: payload, _error: false, _attempts: 0, rowIndex: null,
+    ts: payload.timestamp, timestamp: payload.timestamp, accountMinus, value, label, details,
     accountPlus: payload.accountPlus, assetclassdetails: assetclass
   };
   const rows = getCachedRows(); rows.unshift(entry); setCachedRows(rows);
   showToast('Saved!');
   resetForm();
-  sendEntry(entry);
+  retryStep = 0;
+  requestSync();
 }
 
-async function sendEntry(entry) {
-  try {
-    const result = await apiCall(entry._payload);
-    if (result && result.success) {
-      updateCachedEntry(entry._id, { rowIndex: result.rowIndex, _pending: false, _error: false, _payload: null });
-    } else {
-      updateCachedEntry(entry._id, { _pending: false, _error: true });
-      showToast('⚠ Not saved — open History to retry');
-    }
-  } catch (e) {
-    updateCachedEntry(entry._id, { _pending: false, _error: true });
-    showToast('⚠ Not saved — open History to retry');
-  }
-  if (document.getElementById('viewHistory').classList.contains('active')) {
-    renderRecent(getCachedRows());
-  }
-}
-
-function retryEntry(id) {
-  const rows = getCachedRows();
-  const e = rows.find(r => r._id === id);
-  if (!e || !e._payload) return;
-  updateCachedEntry(id, { _pending: true, _error: false });
-  renderRecent(getCachedRows());
-  sendEntry(e);
+function retryNow() {
+  retryStep = 0;
+  getCachedRows().forEach(r => { if (isUnsynced(r)) r._error = false; });
+  refreshHistoryView();
+  requestSync();
 }
 
 // ============================================================
@@ -970,29 +1210,39 @@ function retryEntry(id) {
 // entry (with a warning) if the server delete fails. The backend verifies the
 // row by content, so it never deletes the wrong row even if numbers shifted.
 // ============================================================
-// rowKeys of deletes that are in flight, so a background refresh can't flash
-// them back before the server confirms the row is gone.
-const pendingDeleteKeys = new Set();
+// Snapshots of rows whose delete is in flight, so a background refresh can't
+// flash them back before the server confirms the row is gone.
+const pendingDeletes = [];
 
 function restoreDeletedEntry(removed, idx) {
   const rows = getCachedRows();
   const at = (idx >= 0 && idx <= rows.length) ? idx : 0;
   rows.splice(at, 0, removed);
   setCachedRows(rows);
-  if (document.getElementById('viewHistory').classList.contains('active')) {
-    renderRecent(getCachedRows());
-  }
+  refreshHistoryView();
 }
 
 function optimisticDelete(row) {
-  const key = rowKey(row);
   const rows = getCachedRows();
-  // Identify the row by identity (optimistic _id) or content, NEVER by the
-  // sheet row number, which shifts when other rows are deleted.
-  const idx = rows.findIndex(r => (r._id && row._id) ? r._id === row._id : rowKey(r) === key);
+  // Identify by object identity / optimistic _id / content, NEVER by the sheet
+  // row number, which shifts when other rows are deleted.
+  const idx = rows.findIndex(r => r === row || ((r._id && row._id) ? r._id === row._id : sameEntry(r, row)));
   const removed = idx >= 0 ? rows[idx] : Object.assign({}, row);
+
+  // Unsaved outbox entry: nothing on the server to delete, just discard it.
+  // (If an earlier send did reach the sheet, the next refresh shows it again.)
+  if (isUnsynced(removed)) {
+    if (idx >= 0) { rows.splice(idx, 1); setCachedRows(rows); }
+    renderRecent(getCachedRows());
+    updateSyncStatus();
+    showToast('Discarded');
+    return;
+  }
+
   if (idx >= 0) { rows.splice(idx, 1); setCachedRows(rows); }
-  pendingDeleteKeys.add(key);
+  const tomb = Object.assign({}, removed);
+  pendingDeletes.push(tomb);
+  const dropTomb = () => { const i = pendingDeletes.indexOf(tomb); if (i >= 0) pendingDeletes.splice(i, 1); };
   renderRecent(getCachedRows());
   showToast('Deleted');
 
@@ -1000,27 +1250,26 @@ function optimisticDelete(row) {
   // if it shifted, so a stale hint can never delete the wrong row.
   const payload = {
     action: 'delete',
-    rowIndex: row.rowIndex,
-    accountMinus: row.accountMinus,
-    value: row.value,
-    label: row.label,
-    details: row.details
+    rowIndex: removed.rowIndex,
+    accountMinus: removed.accountMinus,
+    value: removed.value,
+    label: removed.label,
+    details: removed.details
   };
-  apiCall(payload).then(result => {
-    if (result && result.success) {
-      // Reconcile fresh row numbers in the background (so later edits target the
-      // right row). The tombstone keeps this row from flashing back meanwhile.
-      loadRecent().finally(() => pendingDeleteKeys.delete(key));
-    } else {
-      pendingDeleteKeys.delete(key);
-      restoreDeletedEntry(removed, idx);
-      showToast('⚠ Delete failed — entry restored');
-    }
-  }).catch(() => {
-    pendingDeleteKeys.delete(key);
+  const fail = () => {
+    dropTomb();
     restoreDeletedEntry(removed, idx);
     showToast('⚠ Delete failed — entry restored');
-  });
+  };
+  apiCall(payload, WRITE_TIMEOUT_MS).then(result => {
+    if (result && result.success) {
+      // Reconcile fresh row numbers (so later edits target the right row). The
+      // tombstone keeps this row hidden until that refresh has landed.
+      requestSync().then(dropTomb, dropTomb);
+    } else {
+      fail();
+    }
+  }).catch(fail);
 }
 
 // ============================================================
@@ -1095,72 +1344,107 @@ function populateForm(row) {
 
 // ============================================================
 // RECENT ENTRIES
+// Renders one HTML string (no per-row listeners; one delegated handler) and
+// only the first HISTORY_PAGE rows, with "Show more". Skips the DOM write when
+// nothing changed, so background refreshes don't cause jank.
 // ============================================================
+let historyLimit = HISTORY_PAGE;
+let renderedRows = [];
+let lastRenderHtml = '';
+
+function esc(s) {
+  return String(s === undefined || s === null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+function setListHtml(html) {
+  if (html === lastRenderHtml) return;
+  lastRenderHtml = html;
+  document.getElementById('recentList').innerHTML = html;
+}
+
 function renderRecent(rows) {
-  const list = document.getElementById('recentList');
+  updateSyncStatus();
   if (!rows || rows.length === 0) {
-    list.innerHTML = '<p style="color:var(--secondary);font-size:14px;">No entries yet.</p>';
+    renderedRows = [];
+    setListHtml(syncInFlight
+      ? '<div class="spinner"></div>'
+      : lastSyncFailed
+        ? '<p style="color:var(--secondary);font-size:14px;">Failed to load. Tap the status above to retry.</p>'
+        : '<p style="color:var(--secondary);font-size:14px;">No entries yet.</p>');
     return;
   }
-  list.innerHTML = '';
-  rows.forEach(row => {
-    const div = document.createElement('div');
-    div.className = 'recent-entry';
-    const val = parseInt(row.value) || 0;
+  const shown = rows.slice(0, historyLimit);
+  renderedRows = shown;
+  const html = shown.map((row, i) => {
+    const val = Math.round(toNum(row.value));
     const valClass = val >= 0 ? 'positive' : 'negative';
     const valStr = val >= 0 ? `+${val}` : `${val}`;
     let statusHtml = '';
-    if (row._pending) statusHtml = '<div class="re-status saving">saving…</div>';
-    else if (row._error) statusHtml = '<div class="re-status error">not saved · tap to retry</div>';
-    const canDelete = !row._pending && !row._error && row.rowIndex;
-    div.innerHTML = `
+    let canDelete = false;
+    if (isUnsynced(row)) {
+      if (row._sending) statusHtml = '<div class="re-status saving">saving…</div>';
+      else if (row._error) statusHtml = '<div class="re-status error">not saved yet · retrying · tap to retry now</div>';
+      else statusHtml = '<div class="re-status saving">waiting to save…</div>';
+      canDelete = !row._sending; // discard a stuck local entry
+    } else {
+      canDelete = !!row.rowIndex;
+    }
+    return `<div class="recent-entry" data-i="${i}">
       <div class="re-top">
-        <span class="re-value ${valClass}">${valStr}</span>
-        <span class="re-time">${row.timestamp}</span>
+        <span class="re-value ${valClass}">${esc(valStr)}</span>
+        <span class="re-time">${esc(row.timestamp)}</span>
       </div>
-      <div class="re-details">${row.accountMinus} · ${row.label} · ${row.details}</div>
+      <div class="re-details">${esc(row.accountMinus)} · ${esc(row.label)} · ${esc(row.details)}</div>
       ${statusHtml}
-      ${canDelete ? '<button class="btn-delete-entry">✕</button>' : ''}
-    `;
-
-    if (row._error) {
-      div.addEventListener('click', () => retryEntry(row._id));
-    } else if (!row._pending && row.rowIndex) {
-      div.querySelector('.re-details').addEventListener('click', () => populateForm(row));
-      div.querySelector('.re-top').addEventListener('click', () => populateForm(row));
-    }
-
-    const delBtn = div.querySelector('.btn-delete-entry');
-    if (delBtn) {
-      delBtn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        if (!confirm('Delete this entry?')) return;
-        optimisticDelete(row);
-      });
-    }
-    list.appendChild(div);
-  });
+      ${canDelete ? '<button class="btn-delete-entry" type="button" aria-label="Delete entry">✕</button>' : ''}
+    </div>`;
+  }).join('');
+  const more = rows.length > shown.length
+    ? `<button class="btn-more" type="button" data-more="1">Show more (${rows.length - shown.length})</button>`
+    : '';
+  setListHtml(html + more);
 }
 
-async function loadRecent() {
-  const cached = getCachedRows();
-  if (cached.length) renderRecent(cached);
-  else document.getElementById('recentList').innerHTML = '<div class="spinner"></div>';
-  try {
-    const result = await apiCall({ action: 'getRecent', count: 500 });
-    if (result && result.success) {
-      // Drop any rows whose delete is still in flight so they don't reappear.
-      const server = (result.rows || []).filter(r => !pendingDeleteKeys.has(rowKey(r)));
-      const serverKeys = new Set(server.map(rowKey));
-      // Preserve local entries that are not yet on the server (pending/failed).
-      const unsynced = getCachedRows().filter(r => (r._pending || r._error) && !serverKeys.has(rowKey(r)));
-      const merged = unsynced.concat(server);
-      setCachedRows(merged);
-      renderRecent(merged);
-    }
-  } catch (e) {
-    if (!getCachedRows().length) document.getElementById('recentList').innerHTML = '<p>Failed to load.</p>';
+document.getElementById('recentList').addEventListener('click', (e) => {
+  if (e.target.closest('[data-more]')) {
+    historyLimit += HISTORY_PAGE;
+    renderRecent(getCachedRows());
+    return;
   }
+  const item = e.target.closest('.recent-entry');
+  if (!item) return;
+  const row = renderedRows[Number(item.dataset.i)];
+  if (!row) return;
+  if (e.target.closest('.btn-delete-entry')) {
+    e.stopPropagation();
+    const msg = isUnsynced(row)
+      ? 'Discard this unsaved entry? It will not be sent to the sheet.'
+      : 'Delete this entry?';
+    if (!confirm(msg)) return;
+    optimisticDelete(row);
+    return;
+  }
+  if (isUnsynced(row)) { if (!row._sending) retryNow(); return; }
+  if (row.rowIndex) populateForm(row);
+});
+
+document.getElementById('syncStatus').addEventListener('click', () => {
+  if (outboxCount()) retryNow(); else refreshIfIdle();
+});
+
+// Paint the cache instantly, then refresh in the background unless the data
+// is already fresh (e.g. the app-open sync just ran) or a request is running.
+function openHistory() {
+  historyLimit = HISTORY_PAGE;
+  const cached = getCachedRows();
+  lastRenderHtml = '';
+  renderRecent(cached);
+  if (!cached.length && !syncInFlight) setListHtml('<div class="spinner"></div>');
+  const fresh = lastSyncAt && (Date.now() - lastSyncAt < FRESH_MS) && !lastSyncFailed;
+  if (outboxCount()) retryNow();
+  else if (!fresh) refreshIfIdle();
 }
 
 // ============================================================
@@ -1173,7 +1457,7 @@ function showView(id) {
 
 document.getElementById('btnRecent').addEventListener('click', () => {
   showView('viewHistory');
-  loadRecent();
+  openHistory();
 });
 document.getElementById('btnNew').addEventListener('click', () => {
   resetForm();
@@ -1456,7 +1740,19 @@ document.addEventListener('DOMContentLoaded', () => {
   buildNumRoll();
   initNumRollTouch();
   initCategoryEditor();
+  // Flush any unsaved entries and warm the backend + History cache as soon
+  // as the app opens, so History is already fresh when tapped.
+  requestSync();
 });
+
+// Retry the outbox / refresh when the app returns to the foreground or the
+// phone reconnects (iOS pauses timers and kills requests in the background).
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState !== 'visible') return;
+  if (outboxCount()) retryNow();
+  else if (historyVisible() && Date.now() - lastSyncAt > FRESH_MS) refreshIfIdle();
+});
+window.addEventListener('online', () => { if (outboxCount()) retryNow(); else if (historyVisible()) refreshIfIdle(); });
 </script>
 </body>
 </html>
