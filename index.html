@@ -271,7 +271,7 @@ body {
   <div class="header-left">
     <button id="btnRecent">History</button>
   </div>
-  <h1>Expense Tracker v4</h1>
+  <h1>Expense Tracker v5</h1>
   <button id="btnNew">+ New</button>
 </div>
 
@@ -838,7 +838,7 @@ document.getElementById('manualValue').addEventListener('input', (e) => {
 // "saving…". A write that times out but actually landed is harmless: the
 // retry is deduped server-side.
 const READ_TIMEOUT_MS = 20000;
-const WRITE_TIMEOUT_MS = 35000;
+const WRITE_TIMEOUT_MS = 30000;
 
 async function apiCall(data, timeoutMs) {
   const ctrl = (typeof AbortController !== 'undefined') ? new AbortController() : null;
@@ -879,7 +879,7 @@ function formatTimestamp() {
 // whole cache from localStorage on every call.
 // ============================================================
 const RECENT_CACHE_KEY = 'expenseTrackerRecentCache';
-const HISTORY_FETCH = 500;  // rows pulled from the sheet tail
+const HISTORY_FETCH = 300;  // rows pulled from the sheet tail
 const HISTORY_PAGE = 100;   // rows rendered per "Show more" step
 const RETRY_DELAYS_MS = [3000, 10000, 30000, 60000, 120000];
 const FRESH_MS = 15000;     // skip a History refetch if synced this recently
@@ -975,42 +975,25 @@ function sameEntry(a, b) {
 
 // ============================================================
 // SYNC ENGINE
-// One request at a time (single-flight), so overlapping refreshes can never
-// overwrite each other. Each run flushes the whole outbox AND pulls the fresh
-// History tail in ONE Apps Script call (`sync`, backend lean-v3). Falls back to
-// submit-per-entry + getRecent if the deployed backend is still lean-v2.
-// Failures retry automatically with backoff, and again whenever the app comes
-// back to the foreground or the phone goes back online.
+// Two independent lanes so a save never waits for a History read:
+//  - WRITE lane (flushOutbox): sends outbox entries one by one with `submit`.
+//    An entry flips to saved the moment ITS OWN submit returns (one Apps Script
+//    round trip). Works on every backend version; the backend dedupes, so
+//    retries never duplicate.
+//  - READ lane (requestRefresh): `getRecent` for History, single-flight. A read
+//    that started before a save was confirmed can't hide that entry (see
+//    mergeServerRows).
+// Failed saves retry automatically with backoff, and again whenever the app
+// comes back to the foreground or the phone goes back online.
 // ============================================================
-let syncInFlight = false;
-let syncWaiters = [];
 let retryTimer = null;
 let retryStep = 0;
-let legacyBackend = false;
-let lastSyncFailed = false;
-
-function requestSync() {
-  return new Promise(resolve => {
-    syncWaiters.push(resolve);
-    if (!syncInFlight) runSync();
-  });
-}
-// Refresh unless a request is already running (its answer is fresh enough).
-function refreshIfIdle() { if (!syncInFlight) requestSync(); }
-
-async function runSync() {
-  syncInFlight = true;
-  if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
-  const waiters = syncWaiters; syncWaiters = [];
-  let ok = false;
-  try { ok = await doSync(); } catch (e) { ok = false; }
-  syncInFlight = false;
-  lastSyncFailed = !ok;
-  updateSyncStatus();
-  waiters.forEach(w => { try { w(ok); } catch (e) {} });
-  if (syncWaiters.length) { runSync(); return; }
-  scheduleRetry();
-}
+let flushing = false;
+let flushAgain = false;
+let lastWriteFailed = false;
+let readInFlight = false;
+let readWaiters = [];
+let lastReadFailed = false;
 
 function scheduleRetry() {
   if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
@@ -1018,7 +1001,7 @@ function scheduleRetry() {
   if (document.visibilityState === 'hidden') return; // resumes on visibilitychange
   const delay = RETRY_DELAYS_MS[Math.min(retryStep, RETRY_DELAYS_MS.length - 1)];
   retryStep++;
-  retryTimer = setTimeout(() => { retryTimer = null; requestSync(); }, delay);
+  retryTimer = setTimeout(() => { retryTimer = null; flushOutbox(); }, delay);
 }
 
 function markFailed(e) {
@@ -1027,82 +1010,78 @@ function markFailed(e) {
   if (e._attempts === 1 && !historyVisible()) showToast('⚠ Not saved yet · retrying automatically');
 }
 
-async function doSync() {
-  const queue = getCachedRows().filter(isUnsynced);
-  queue.forEach(e => { e._sending = true; });
-  updateSyncStatus(true);
-  refreshHistoryView();
-
-  let result = null;
-  try {
-    if (!legacyBackend) {
-      result = await apiCall({
-        action: 'sync',
-        count: HISTORY_FETCH,
-        entries: queue.map(e => Object.assign({ id: e._id }, e._payload))
-      }, queue.length ? WRITE_TIMEOUT_MS : READ_TIMEOUT_MS);
-      if (result && result.success === false && /unknown action/i.test(String(result.error || ''))) {
-        legacyBackend = true;
-        result = null;
+async function flushOutbox() {
+  if (flushing) { flushAgain = true; return; }
+  flushing = true;
+  if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
+  let failed = false;
+  do {
+    flushAgain = false;
+    const queue = getCachedRows().filter(r => isUnsynced(r) && !r._sending);
+    for (const e of queue) {
+      if (!e._payload) continue; // matched to a server row by a refresh meanwhile
+      if (!getCachedRows().includes(e)) continue; // discarded meanwhile
+      e._sending = true;
+      updateSyncStatus();
+      refreshHistoryView();
+      let res = null;
+      try { res = await apiCall(e._payload, WRITE_TIMEOUT_MS); } catch (err) { res = null; }
+      e._sending = false;
+      if (res && res.success) {
+        e._payload = null; e._error = false; e._attempts = 0; e._savedAt = Date.now();
+        if (res.rowIndex) e.rowIndex = res.rowIndex;
+      } else {
+        markFailed(e);
+        failed = true;
       }
+      setCachedRows(getCachedRows());
+      updateSyncStatus();
+      refreshHistoryView();
+      if (failed) break; // likely offline: stop and let the backoff retry
     }
-    if (legacyBackend) result = await legacySync(queue);
-  } catch (err) {
-    result = null;
-  }
-
-  queue.forEach(e => { e._sending = false; });
-  if (!result || !result.success) {
-    queue.forEach(markFailed);
-    setCachedRows(getCachedRows());
-    refreshHistoryView();
-    return false;
-  }
-
-  const byId = {};
-  (result.results || []).forEach(r => { byId[r.id] = r; });
-  queue.forEach(e => {
-    const r = byId[e._id];
-    if (r && r.success) {
-      e._payload = null; e._error = false; e._attempts = 0;
-      if (r.rowIndex) e.rowIndex = r.rowIndex;
-    } else {
-      markFailed(e);
-    }
-  });
-
-  if (Array.isArray(result.rows)) {
-    mergeServerRows(result.rows);
-  } else {
-    setCachedRows(getCachedRows());
-  }
+  } while (flushAgain && !failed);
+  flushing = false;
+  lastWriteFailed = failed;
+  if (!failed) retryStep = 0;
+  updateSyncStatus();
   refreshHistoryView();
-  return Array.isArray(result.rows) && !queue.some(isUnsynced);
+  scheduleRetry();
 }
 
-// lean-v2 backend: one submit per queued entry, then getRecent.
-async function legacySync(queue) {
-  const results = [];
-  for (const e of queue) {
-    try {
-      const r = await apiCall(e._payload, WRITE_TIMEOUT_MS);
-      results.push({ id: e._id, success: !!(r && r.success), rowIndex: r && r.rowIndex });
-    } catch (err) {
-      results.push({ id: e._id, success: false });
-    }
-  }
-  let rows;
+// Resolves after a read that STARTED after this call (so callers such as the
+// post-delete reconcile always get row numbers from after their change).
+function requestRefresh() {
+  return new Promise(resolve => {
+    readWaiters.push(resolve);
+    if (!readInFlight) runRead();
+  });
+}
+// Refresh unless a read is already running (its answer is fresh enough).
+function refreshIfIdle() { if (!readInFlight) requestRefresh(); }
+
+async function runRead() {
+  readInFlight = true;
+  const waiters = readWaiters; readWaiters = [];
+  const startedAt = Date.now();
+  updateSyncStatus();
+  let ok = false;
   try {
     const g = await apiCall({ action: 'getRecent', count: HISTORY_FETCH }, READ_TIMEOUT_MS);
-    if (g && g.success) rows = g.rows;
-  } catch (err) {}
-  return { success: true, results: results, rows: rows };
+    if (g && g.success && Array.isArray(g.rows)) { mergeServerRows(g.rows, startedAt); ok = true; }
+  } catch (err) { ok = false; }
+  readInFlight = false;
+  lastReadFailed = !ok;
+  updateSyncStatus();
+  refreshHistoryView();
+  waiters.forEach(w => { try { w(ok); } catch (e) {} });
+  if (readWaiters.length) runRead();
 }
 
-// Server rows are the truth. Keep local outbox entries only if the server
-// does not already have them (if it does, the save landed and just its
-// response was lost), and hide rows whose delete is still in flight.
-function mergeServerRows(serverRows) {
+// Server rows are the truth. Keep a local entry only if the server does not
+// already have it AND it is either still unsynced or was confirmed after this
+// read started (the read may predate the write). Rows whose delete is in
+// flight stay hidden.
+function mergeServerRows(serverRows, startedAt) {
   const server = serverRows.filter(s => !pendingDeletes.some(t => sameEntry(t, s)));
   const byContent = new Map();
   server.forEach(s => {
@@ -1110,24 +1089,26 @@ function mergeServerRows(serverRows) {
     if (!byContent.has(k)) byContent.set(k, []);
     byContent.get(k).push(s);
   });
-  const unsynced = getCachedRows().filter(r =>
-    isUnsynced(r) && !(byContent.get(contentKey(r)) || []).some(s => sameEntry(r, s)));
+  const local = getCachedRows().filter(r =>
+    (isUnsynced(r) || (r._savedAt && r._savedAt >= startedAt)) &&
+    !(byContent.get(contentKey(r)) || []).some(s => sameEntry(r, s)));
   lastSyncAt = Date.now();
-  setCachedRows(unsynced.concat(server));
+  setCachedRows(local.concat(server));
 }
 
-function updateSyncStatus(busy) {
+function updateSyncStatus() {
   const el = document.getElementById('syncStatus');
   if (!el) return;
   const n = outboxCount();
-  const waiting = n ? ` · ${n} waiting to save` : '';
-  let text;
-  if (busy || syncInFlight) text = n ? `Saving ${n}…` : 'Refreshing…';
-  else if (lastSyncFailed) text = n ? `${n} not saved · tap to retry` : 'Offline · tap to retry';
-  else if (lastSyncAt) text = 'Updated ' + fmtSyncTime(lastSyncAt) + waiting;
-  else text = waiting ? waiting.slice(3) : '';
+  let text, bad = false;
+  if (n && flushing) text = `Saving ${n}…`;
+  else if (n) { text = lastWriteFailed ? `${n} not saved · tap to retry` : `${n} waiting to save`; bad = true; }
+  else if (readInFlight) text = 'Refreshing…';
+  else if (lastReadFailed) { text = 'Offline · tap to retry'; bad = true; }
+  else if (lastSyncAt) text = 'Updated ' + fmtSyncTime(lastSyncAt);
+  else text = '';
   el.textContent = text;
-  el.classList.toggle('failed', !busy && !syncInFlight && (lastSyncFailed || n > 0));
+  el.classList.toggle('failed', bad);
 }
 function fmtSyncTime(ms) {
   const d = new Date(ms), now = new Date();
@@ -1174,7 +1155,7 @@ async function handleSubmit() {
         });
         showToast('Updated!');
         resetForm();
-        requestSync(); // pull the edited row back so the cache matches the sheet
+        requestRefresh(); // pull the edited row back so the cache matches the sheet
       } else {
         showToast('Error: ' + ((result && result.error) || 'Unknown'));
       }
@@ -1194,14 +1175,15 @@ async function handleSubmit() {
   showToast('Saved!');
   resetForm();
   retryStep = 0;
-  requestSync();
+  flushOutbox();
 }
 
 function retryNow() {
   retryStep = 0;
   getCachedRows().forEach(r => { if (isUnsynced(r)) r._error = false; });
+  lastWriteFailed = false;
   refreshHistoryView();
-  requestSync();
+  flushOutbox();
 }
 
 // ============================================================
@@ -1265,7 +1247,7 @@ function optimisticDelete(row) {
     if (result && result.success) {
       // Reconcile fresh row numbers (so later edits target the right row). The
       // tombstone keeps this row hidden until that refresh has landed.
-      requestSync().then(dropTomb, dropTomb);
+      requestRefresh().then(dropTomb, dropTomb);
     } else {
       fail();
     }
@@ -1368,9 +1350,9 @@ function renderRecent(rows) {
   updateSyncStatus();
   if (!rows || rows.length === 0) {
     renderedRows = [];
-    setListHtml(syncInFlight
+    setListHtml(readInFlight
       ? '<div class="spinner"></div>'
-      : lastSyncFailed
+      : lastReadFailed
         ? '<p style="color:var(--secondary);font-size:14px;">Failed to load. Tap the status above to retry.</p>'
         : '<p style="color:var(--secondary);font-size:14px;">No entries yet.</p>');
     return;
@@ -1441,10 +1423,10 @@ function openHistory() {
   const cached = getCachedRows();
   lastRenderHtml = '';
   renderRecent(cached);
-  if (!cached.length && !syncInFlight) setListHtml('<div class="spinner"></div>');
-  const fresh = lastSyncAt && (Date.now() - lastSyncAt < FRESH_MS) && !lastSyncFailed;
-  if (outboxCount()) retryNow();
-  else if (!fresh) refreshIfIdle();
+  if (!cached.length && !readInFlight) setListHtml('<div class="spinner"></div>');
+  const fresh = lastSyncAt && (Date.now() - lastSyncAt < FRESH_MS) && !lastReadFailed;
+  if (outboxCount() && !flushing) retryNow();
+  if (!fresh) refreshIfIdle();
 }
 
 // ============================================================
@@ -1742,17 +1724,18 @@ document.addEventListener('DOMContentLoaded', () => {
   initCategoryEditor();
   // Flush any unsaved entries and warm the backend + History cache as soon
   // as the app opens, so History is already fresh when tapped.
-  requestSync();
+  if (outboxCount()) flushOutbox();
+  requestRefresh();
 });
 
 // Retry the outbox / refresh when the app returns to the foreground or the
 // phone reconnects (iOS pauses timers and kills requests in the background).
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState !== 'visible') return;
-  if (outboxCount()) retryNow();
-  else if (historyVisible() && Date.now() - lastSyncAt > FRESH_MS) refreshIfIdle();
+  if (outboxCount() && !flushing) retryNow();
+  if (historyVisible() && Date.now() - lastSyncAt > FRESH_MS) refreshIfIdle();
 });
-window.addEventListener('online', () => { if (outboxCount()) retryNow(); else if (historyVisible()) refreshIfIdle(); });
+window.addEventListener('online', () => { if (outboxCount() && !flushing) retryNow(); if (historyVisible()) refreshIfIdle(); });
 </script>
 </body>
 </html>

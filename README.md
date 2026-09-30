@@ -32,10 +32,7 @@ roll-picker form and History, but **no query engine and no separate database**.
 >   (response lost) stayed "not saved" forever and showed twice. v4 compares
 >   normalised date/time parts (M/D or D/M) and numbers, and lean-v3 also returns
 >   a normalised `ts` per row.
-> - **One round trip.** New `sync` action: flushes the whole outbox and returns the
->   History tail in a single Apps Script call. Requests are single-flight, so
->   overlapping refreshes can't overwrite each other.
-> - **Timeouts.** Every call has a hard timeout (20s reads, 35s writes), so a hung
+> - **Timeouts.** Every call has a hard timeout (20s reads, 30s writes), so a hung
 >   request becomes a retry instead of a permanent "saving…". Non-JSON (HTML
 >   error page) responses count as retryable failures.
 > - **Faster render.** In-memory cache (no re-parsing localStorage), one HTML
@@ -48,10 +45,21 @@ roll-picker form and History, but **no query engine and no separate database**.
 > - History header shows a status line ("Updated 14:05", "Refreshing…",
 >   "2 not saved · tap to retry"). Tap it to retry or refresh. An unsaved entry
 >   can be discarded with ✕.
-> - The v4 frontend also works against the old lean-v2 backend (it detects the
->   missing `sync` action and falls back to submit + getRecent), but only lean-v3
->   gives the single-round-trip speed and the write lock. **Redeploy the backend**
->   (see "Updating the backend").
+>
+> **v5: a save no longer waits for History.** v4 bundled the save with the
+> History read in one `sync` call (or submit + getRecent on the lean-v2
+> backend) and queued it behind any read already in flight, e.g. the refresh
+> fired on app open. So the row was in the sheet within a second, but the entry
+> stayed "saving…" until the whole read finished (30s+ on a cold Apps Script).
+> v5 splits two independent lanes:
+> - **Write lane** (`flushOutbox`): each outbox entry is sent with a plain
+>   `submit` and flips to saved the moment its own response returns (one round
+>   trip). Never waits for a read.
+> - **Read lane** (`requestRefresh` / `runRead`): `getRecent` (300 rows),
+>   single-flight. An entry confirmed after a read started is kept even if that
+>   (older) read doesn't contain it yet, so it never flickers out.
+> - Works the same on lean-v2 and lean-v3; lean-v3 is still recommended for the
+>   write lock and wider dedupe window (see "Updating the backend").
 
 Three things drive the speed:
 
@@ -123,8 +131,8 @@ All writes (`sync` with entries, `submit`, `update`, `delete`) run under a
 script lock.
 - `sync` — `{entries:[{id, ...submit payload}], count}`. Writes every entry
   (idempotent, same dedupe as `submit`), then returns
-  `{results:[{id, success, rowIndex}], rows, total}`. This is what the frontend
-  uses for both saving and refreshing History.
+  `{results:[{id, success, rowIndex}], rows, total}`. Not used by the v5
+  frontend (bundling the read made saves wait), kept for batch use.
 - `submit` — append a row (plus mirror row for transfers). Idempotent: dedupes
   against the last 300 rows on `timestamp | account | value | label` (also
   matching a day/month-swapped reading, in case the sheet locale auto-parsed the
@@ -148,8 +156,10 @@ script lock.
   `_payload`; `_sending` / `_error` / `_attempts` only drive the status text.
   v3 caches are migrated on load (old `_pending` flags dropped, entries kept in
   the outbox and resent).
-- Sync engine (`requestSync` / `runSync` / `doSync` in `index.html`): single
-  flight, whole outbox plus History tail per call, backoff retry. Matching of
+- Sync engine in `index.html`: write lane `flushOutbox()` (one `submit` per
+  entry, sequential, backoff retry via `scheduleRetry()`) and read lane
+  `requestRefresh()` / `runRead()` (`getRecent`, single-flight, merged by
+  `mergeServerRows(rows, startedAt)`). Matching of
   local vs server rows is `sameEntry()` (normalised content + date/time parts).
 - If a send keeps failing, History shows "not saved yet · retrying". Tap the entry
   or the status line to retry immediately, or ✕ to discard it.
